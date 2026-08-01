@@ -1,6 +1,7 @@
 ﻿using System.Windows.Forms;
-using ExileCore.Shared.Interfaces;
+using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Nodes;
+using ExileCore.Shared.Interfaces;
 using Newtonsoft.Json;
 using SharpDX;
 
@@ -11,7 +12,7 @@ public class VillageHelperSettings : ISettings
     //Mandatory setting to allow enabling/disabling your plugin
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
-    public HotkeyNode ToggleWindowHotkey { get; set; } = new HotkeyNode(Keys.None);
+    public HotkeyNodeV2 ToggleWindowHotkey { get; set; } = new HotkeyNodeV2(Keys.None);
     public ToggleNode ShowResources { get; set; } = new ToggleNode(true);
     public ToggleNode ShowActions { get; set; } = new ToggleNode(true);
     public ToggleNode ShowUpgrades { get; set; } = new ToggleNode(true);
@@ -24,6 +25,10 @@ public class VillageHelperSettings : ISettings
     public ToggleNode ShowProjectedCurrentGold { get; set; } = new ToggleNode(false);
 
     public ToggleNode ShowWorkerUpgradeTips { get; set; } = new ToggleNode(true);
+    [Menu("Recommend Only Cost Efficient Recruits", "In the recruitment panel only show the green recommendation badge\n" +
+                                                    "on workers, where their highest paid job type is an upgrade to an\n" +
+                                                    "existing worker")]
+    public ToggleNode RecommendOnlyCostEfficientRecruits { get; set; } = new ToggleNode(false);
     public ColorNode GoodColor { get; set; } = new ColorNode(Color.Green);
     public ColorNode NeutralColor { get; set; } = new ColorNode(Color.White);
     public ColorNode BadColor { get; set; } = new ColorNode(Color.Red);

@@ -433,7 +433,11 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 if (upgradeList.Where(x => x.costPerPoint > costPerPoint).ToList() is { Count: > 0 } uList2)
                 {
                     workersToReplace.Add(uList2[0].worker.WorkerName);
-                    indicatorType = Math.Max(indicatorType, 2);
+                    // recruitment panel only:
+                    // show highest recommendation only on those worker offers whose highset paid job type is an upgrade to an existing worker of that job type
+                    if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
+                        indicatorType = Math.Max(indicatorType, 2);
+                    }
                     var longestWorkerName = uList2.Max(x => x.worker.WorkerName.Length);
                     tooltipActions.Add(() =>
                     {
@@ -472,7 +476,9 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                          }).ToList() is { Count: > 0 } uList3)
                 {
                     workersToReplace.Add(uList3[0].worker.WorkerName);
-                    indicatorType = Math.Max(indicatorType, 1);
+                    if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
+                        indicatorType = Math.Max(indicatorType, 1);
+                    }
                     var longestWorkerName = uList3.Max(x => x.worker.WorkerName.Length);
                     tooltipActions.Add(() =>
                     {
