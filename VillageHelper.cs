@@ -55,8 +55,10 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         _overlayCache = new TimeCache<List<DrawItem>>(() =>
         {
             var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
-            return ComputeStatusOverlayDrawItems(villageScreen,
-                Settings.ShowProjectedCurrentGold ? villageScreen.CurrentGold : villageScreen.ZoneLoadResources.Gold);
+            try {
+                return ComputeStatusOverlayDrawItems(villageScreen,
+                    Settings.ShowProjectedCurrentGold ? villageScreen.CurrentGold : villageScreen.ZoneLoadResources.Gold);
+            } catch (Exception ex) { return new List<DrawItem>(); }
         }, (long)(Settings.StatusOverlayUpdatePeriod.Value * 1000));
         Settings.StatusOverlayUpdatePeriod.OnValueChanged += (sender, f) => _overlayCache.NewTime((long)(f * 1000));
         return true;
