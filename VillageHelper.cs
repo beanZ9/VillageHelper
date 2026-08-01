@@ -249,6 +249,10 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
             if (villageShipmentScreen.ShipIsOpened)
             {
                 var shipIndex = villageShipmentScreen.OpenedShipIndex;
+                if (shipIndex < 0 || shipIndex >= villageScreen.ShipInfo.Count) {
+                    DebugWindow.LogMsg("Invalid opened ship index.");
+                    return;
+                }
                 var shipInfo = villageScreen.ShipInfo[shipIndex];
                 var targetPort = shipInfo.TargetPort;
                 var targetPortIndex = GameController.Files.VillageShippingPorts.EntriesList.IndexOf(targetPort);
