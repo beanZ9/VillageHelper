@@ -1,4 +1,5 @@
-﻿using System.Windows.Forms;
+﻿using System.Collections.Generic;
+using System.Windows.Forms;
 using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Nodes;
 using ExileCore.Shared.Interfaces;
@@ -6,6 +7,12 @@ using Newtonsoft.Json;
 using SharpDX;
 
 namespace VillageHelper;
+
+public class WorkerWageSample
+{
+    public int WagePerHour { get; set; }
+    public Dictionary<string, int> JobRanks { get; set; } = new();
+}
 
 public class VillageHelperSettings : ISettings
 {
@@ -26,8 +33,8 @@ public class VillageHelperSettings : ISettings
 
     public ToggleNode ShowWorkerUpgradeTips { get; set; } = new ToggleNode(true);
     [Menu("Recommend Only Cost Efficient Recruits", "In the recruitment panel only show the green recommendation badge\n" +
-                                                    "on workers, where their highest paid job type is an upgrade to an\n" +
-                                                    "existing worker")]
+                                                    "on workers when the skill that is an upgrade to an existing worker is also their \n" +
+                                                    "highest paid skill. Avoids overpaying workers by wage but increases reroll cost.")]
     public ToggleNode RecommendOnlyCostEfficientRecruits { get; set; } = new ToggleNode(false);
     public ColorNode GoodColor { get; set; } = new ColorNode(Color.Green);
     public ColorNode NeutralColor { get; set; } = new ColorNode(Color.White);
@@ -35,6 +42,9 @@ public class VillageHelperSettings : ISettings
 
     [JsonIgnore]
     public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
+    
+    [IgnoreMenu]
+    public Dictionary<string, WorkerWageSample> WorkerWageSamples { get; set; } = new();
 
     public bool WindowShown = true;
 }

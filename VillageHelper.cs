@@ -17,20 +17,87 @@ namespace VillageHelper;
 
 public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 {
-    private static readonly Dictionary<string, float> AverageWorkerWages = new Dictionary<string, float>()
-    {
-        ["Mining"] = 5.5f,
-        ["Smelting"] = 6.5f,
-        ["Farming"] = 13.08f,
-        ["Disenchanting"] = 20.66f,
-        ["Shipping"] = 7.64f,
-        ["Mapping"] = 35.7f,
-    };
-
     private TimeCache<List<DrawItem>> _overlayCache;
     private Dictionary<int, TimeSpan> _previousShipmentTimes;
     private readonly Dictionary<int, DateTime> _shipmentResetTimes = new ();
     private readonly Dictionary<int, TimeSpan> _shipmentResetValues = new ();
+
+    // AverageWorkerWages is derived from Settings.WorkerWageSamples (persisted collection of unique workers and their wages) 
+    private bool _averageWorkerWagesDirty = true;
+    private Dictionary<string, float> _averageWorkerWagesCache;
+
+    private Dictionary<string, float> AverageWorkerWages
+    {
+        get
+        {
+            if (_averageWorkerWagesDirty)
+            {
+                _averageWorkerWagesCache = ComputeAverageWorkerWages();
+                _averageWorkerWagesDirty = false;
+            }
+
+            return _averageWorkerWagesCache;
+        }
+    }
+
+    private Dictionary<string, float> ComputeAverageWorkerWages()
+    {
+        var samples = Settings.WorkerWageSamples.Values.Where(s => s.JobRanks.Count > 0).ToList();
+
+        // Seed: use only single-skill-workers to establish a predictive average wage estimate for each job type
+        var k = new Dictionary<string, float>();
+        foreach (var group in samples.Where(s => s.JobRanks.Count == 1)
+                     .Select(s => (jobId: s.JobRanks.Keys.Single(),
+                         speed: (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(s.JobRanks.Values.Single()).Speed,
+                         wage: (float)s.WagePerHour))
+                     .GroupBy(x => x.jobId))
+        {
+            k[group.Key] = group.Sum(x => x.speed * x.wage) / group.Sum(x => x.speed * x.speed);
+        }
+
+        // Refine: classify every sample and resample until it settles. usually 1-2 runs. 5 max should be plenty here. job types are (at least rn) distinctive enough and if they were not, I guess it doesn't really matter, right? 
+        for (var pass = 0; pass < 5; pass++)
+        {
+            var sumSw = new Dictionary<string, float>();
+            var sumSs = new Dictionary<string, float>();
+
+            foreach (var sample in samples)
+            {
+                var (jobId, speed, _) = sample.JobRanks
+                    .Select(r => (jobId: r.Key, speed: (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed))
+                    .Select(x => (x.jobId, x.speed, predicted: k.GetValueOrDefault(x.jobId, 0f) * x.speed))
+                    .MaxBy(x => x.predicted);
+
+                sumSw[jobId] = sumSw.GetValueOrDefault(jobId) + speed * sample.WagePerHour;
+                sumSs[jobId] = sumSs.GetValueOrDefault(jobId) + speed * speed;
+            }
+
+            foreach (var jobId in sumSs.Keys)
+            {
+                if (sumSs[jobId] > 0)
+                {
+                    k[jobId] = sumSw[jobId] / sumSs[jobId];
+                }
+            }
+        }
+
+        return k;
+    }
+
+    private void RecordWorker(BaseVillageWorker worker)
+    {
+        if (Settings.WorkerWageSamples.ContainsKey(worker.WorkerName))
+        {
+            return;
+        }
+
+        Settings.WorkerWageSamples[worker.WorkerName] = new WorkerWageSample
+        {
+            WagePerHour = worker.WagePerHour,
+            JobRanks = worker.JobRanks.ToDictionary(r => r.Key.Id, r => r.Value),
+        };
+        _averageWorkerWagesDirty = true;
+    }
 
 
     public override bool Initialise()
@@ -38,17 +105,33 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         GameController.LeftPanel.WantUse(() => true);
         Settings.ExportWorkerStats.OnPressed += () =>
         {
-            var text = "";
+            var samplesByJob = new Dictionary<string, List<string>>();
+
+            foreach (var seen in Settings.WorkerWageSamples.Values)
+            {
+                if (seen.JobRanks.Count == 0 || !seen.JobRanks.Keys.All(AverageWorkerWages.ContainsKey))
+                {
+                    continue;
+                }
+
+                var (dominantJobId, _) = seen.JobRanks
+                    .Select(r => (jobId: r.Key, predicted: AverageWorkerWages[r.Key] * GameController.Game.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed))
+                    .MaxBy(x => x.predicted);
+
+                if (!samplesByJob.TryGetValue(dominantJobId, out var samples))
+                {
+                    samplesByJob[dominantJobId] = samples = [];
+                }
+
+                var speed = GameController.Game.Files.VillageJobSkillLevels.GetByLevel(seen.JobRanks[dominantJobId]).Speed;
+                samples.Add($"{{{speed},{seen.WagePerHour}}}");
+            }
+
+            var text = $"# {Settings.WorkerWageSamples.Count} unique workers captured so far\n";
             foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList)
             {
-                var workers = GameController.IngameState.IngameUi.VillageScreen.Workers
-                    .Where(x => x.JobRanks.Count == 1 && x.JobRanks.Single().Key.Equals(jobType) ||
-                                x.JobRanks.OrderByDescending(x => x.Value).Take(2).ToList() switch
-                                {
-                                    var l => l[0].Key.Equals(jobType) && l[0].Value - l[1].Value >= 2,
-                                }).ToList();
-                text +=
-                    $"{jobType.Id} {{{string.Join(",", workers.Select(w => $"{{{GameController.Game.Files.VillageJobSkillLevels.GetByLevel(w.JobRanks[jobType]).Speed},{w.WagePerHour}}}"))}}}\n";
+                var samples = samplesByJob.GetValueOrDefault(jobType.Id, []);
+                text += $"{jobType.Id} {{{string.Join(",", samples)}}}\n";
             }
 
             ImGui.SetClipboardText(text);
@@ -75,6 +158,41 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         return null;
     }
 
+    public override void DrawSettings()
+    {
+        base.DrawSettings();
+
+        if (ImGui.TreeNode("Worker Wage Calibration"))
+        {
+            ImGui.Text($"{Settings.WorkerWageSamples.Count} unique workers recorded");
+            if (ImGui.Button("Reset calibration data"))
+            {
+                Settings.WorkerWageSamples.Clear();
+                _averageWorkerWagesDirty = true;
+            }
+
+            var averages = AverageWorkerWages;
+            if (ImGui.BeginTable("AverageWorkerWagesTable", 2, ImGuiTableFlags.Borders))
+            {
+                ImGui.TableSetupColumn("Job");
+                ImGui.TableSetupColumn("Avg GPH/work unit");
+                ImGui.TableHeadersRow();
+                foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.Text(jobType.Id);
+                    ImGui.TableNextColumn();
+                    ImGui.Text(averages.TryGetValue(jobType.Id, out var avg) ? avg.ToString("F2") : "-");
+                }
+
+                ImGui.EndTable();
+            }
+
+            ImGui.TreePop();
+        }
+    }
+
     public override void Render()
     {
         if (Settings.ToggleWindowHotkey.PressedOnce())
@@ -83,6 +201,20 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         }
 
         var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
+
+        foreach (var worker in villageScreen.Workers)
+        {
+            RecordWorker(worker);
+        }
+
+        if (GameController.IngameState.IngameUi.VillageRecruitmentPanel is { IsVisible: true })
+        {
+            foreach (var worker in villageScreen.WorkersForSale)
+            {
+                RecordWorker(worker);
+            }
+        }
+
         var zoneLoadResources = villageScreen.ZoneLoadResources;
         if (Settings.WindowShown &&
             zoneLoadResources.Resources is { Count: > 0 } resources &&
