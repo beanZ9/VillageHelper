@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
-using System.Runtime.InteropServices.JavaScript;
 using ExileCore;
 using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Components;
@@ -30,6 +28,10 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     };
 
     private TimeCache<List<DrawItem>> _overlayCache;
+    private Dictionary<int, TimeSpan> _previousShipmentTimes;
+    private readonly Dictionary<int, DateTime> _shipmentResetTimes = new ();
+    private readonly Dictionary<int, TimeSpan> _shipmentResetValues = new ();
+
 
     public override bool Initialise()
     {
@@ -316,17 +318,60 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     {
         var result = new List<DrawItem>();
 
-        if (Settings.ShowActions)
-        {
-            if (villageScreen.RemainingShipmentTimes is { Count: > 0 })
-            {
-                foreach (var remainingShipmentTime in villageScreen.RemainingShipmentTimes)
-                {
-                    result.Add(
-                        remainingShipmentTime <= TimeSpan.Zero
-                            ? new DrawItem("SHIPMENT HERE!", Settings.GoodColor, Color.Black)
-                            : new DrawItem($"Shipment {remainingShipmentTime:hh\\:mm}", Settings.NeutralColor, Color.Black)
-                    );
+        if (_previousShipmentTimes == null) {
+            _previousShipmentTimes = new Dictionary<int, TimeSpan>();
+        }
+
+        if (Settings.ShowActions) {
+            if (villageScreen.RemainingShipmentTimes is { Count: > 0 }) {
+                foreach (var (remainingShipmentTime, timer) in villageScreen.RemainingShipmentTimes.Select((x, i) => (x, i))) {
+                    bool hasReset = false;
+                    TimeSpan resetValue = TimeSpan.Zero;
+                    DateTime resetTime = DateTime.UtcNow;
+
+                    if (_previousShipmentTimes.TryGetValue(timer, out var previousTime)) {
+                        if (remainingShipmentTime > previousTime && previousTime > TimeSpan.Zero) {
+                            hasReset = true;
+                            resetValue = remainingShipmentTime;
+                            resetTime = DateTime.UtcNow;
+
+                            _shipmentResetTimes[timer] = resetTime;
+                            _shipmentResetValues[timer] = resetValue;
+                        }
+                    }
+
+                    _previousShipmentTimes[timer] = remainingShipmentTime;
+
+                    string displayText;
+                    Color textColor;
+
+                    if (remainingShipmentTime <= TimeSpan.Zero) {
+                        displayText = "SHIPMENT HERE!";
+                        textColor = Settings.GoodColor;
+
+                        _shipmentResetTimes.Remove(timer);
+                        _shipmentResetValues.Remove(timer);
+                    } else {
+                        bool showResetValue = hasReset;
+
+                        if (!showResetValue && _shipmentResetTimes.TryGetValue(timer, out var storedResetTime)) {
+                            if (DateTime.UtcNow - storedResetTime < TimeSpan.FromSeconds(60) &&
+                                _shipmentResetValues.TryGetValue(timer, out var storedResetValue)) {
+                                showResetValue = true;
+                                resetValue = storedResetValue;
+                            }
+                        }
+
+                        if (showResetValue) {
+                            displayText = $"Shipment {resetValue:hh\\:mm} - Not moving?";
+                            textColor = Settings.BadColor;
+                        } else {
+                            displayText = $"Shipment {remainingShipmentTime:hh\\:mm}";
+                            textColor = Settings.NeutralColor;
+                        }
+                    }
+
+                    result.Add(new DrawItem(displayText, textColor, Color.Black));
                 }
             }
 
