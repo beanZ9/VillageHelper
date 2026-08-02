@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using ExileCore;
 using ExileCore.PoEMemory;
@@ -10,6 +11,7 @@ using ExileCore.Shared.Cache;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Helpers;
 using ImGuiNET;
+using Newtonsoft.Json;
 using SharpDX;
 using Vector2 = System.Numerics.Vector2;
 
@@ -21,8 +23,14 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     private Dictionary<int, TimeSpan> _previousShipmentTimes;
     private readonly Dictionary<int, DateTime> _shipmentResetTimes = new ();
     private readonly Dictionary<int, TimeSpan> _shipmentResetValues = new ();
-
-    // AverageWorkerWages is derived from Settings.WorkerWageSamples (persisted collection of unique workers and their wages) 
+    
+    public class WorkerWageSample
+    {
+        public int WagePerHour { get; set; }
+        public Dictionary<string, int> JobRanks { get; set; } = new();
+    }
+    
+    public Dictionary<string, WorkerWageSample> WorkerWageSamples { get; set; } = new();
     private bool _averageWorkerWagesDirty = true;
     private Dictionary<string, float> _averageWorkerWagesCache;
 
@@ -42,7 +50,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     private Dictionary<string, float> ComputeAverageWorkerWages()
     {
-        var samples = Settings.WorkerWageSamples.Values.Where(s => s.JobRanks.Count > 0).ToList();
+        var samples = WorkerWageSamples.Values.Where(s => s.JobRanks.Count > 0).ToList();
 
         // Seed: use only single-skill-workers to establish a predictive average wage estimate for each job type
         var k = new Dictionary<string, float>();
@@ -86,28 +94,57 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     private void RecordWorker(BaseVillageWorker worker)
     {
-        if (Settings.WorkerWageSamples.ContainsKey(worker.WorkerName))
+        if (WorkerWageSamples.ContainsKey(worker.WorkerName))
         {
             return;
         }
 
-        Settings.WorkerWageSamples[worker.WorkerName] = new WorkerWageSample
+        WorkerWageSamples[worker.WorkerName] = new WorkerWageSample
         {
             WagePerHour = worker.WagePerHour,
             JobRanks = worker.JobRanks.ToDictionary(r => r.Key.Id, r => r.Value),
         };
         _averageWorkerWagesDirty = true;
+        _workerWageSamplesDirty = true;
+    }
+    
+    private string WorkerWageSamplesPath => Path.Combine(ConfigDirectory, "WorkerWageSamples.json");
+    private bool _workerWageSamplesDirty;
+
+    private void SaveWorkerWageSamples()
+    {
+        try
+        {
+            File.WriteAllText(WorkerWageSamplesPath, JsonConvert.SerializeObject(WorkerWageSamples, Formatting.Indented));
+        }
+        catch (Exception ex)
+        {
+            DebugWindow.LogError($"VillageHelper: failed to save worker wage samples: {ex}");
+        }
     }
 
 
     public override bool Initialise()
     {
         GameController.LeftPanel.WantUse(() => true);
+
+        try
+        {
+            if (File.Exists(WorkerWageSamplesPath))
+            {
+                WorkerWageSamples = JsonConvert.DeserializeObject<Dictionary<string, WorkerWageSample>>(File.ReadAllText(WorkerWageSamplesPath)) ?? new();
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugWindow.LogError($"VillageHelper: failed to load worker wage samples: {ex}");
+        }
+
         Settings.ExportWorkerStats.OnPressed += () =>
         {
             var samplesByJob = new Dictionary<string, List<string>>();
 
-            foreach (var seen in Settings.WorkerWageSamples.Values)
+            foreach (var seen in WorkerWageSamples.Values)
             {
                 if (seen.JobRanks.Count == 0 || !seen.JobRanks.Keys.All(AverageWorkerWages.ContainsKey))
                 {
@@ -127,7 +164,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 samples.Add($"{{{speed},{seen.WagePerHour}}}");
             }
 
-            var text = $"# {Settings.WorkerWageSamples.Count} unique workers captured so far\n";
+            var text = $"# {WorkerWageSamples.Count} unique workers captured so far\n";
             foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList)
             {
                 var samples = samplesByJob.GetValueOrDefault(jobType.Id, []);
@@ -155,6 +192,12 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     public override Job Tick()
     {
+        if (_workerWageSamplesDirty)
+        {
+            SaveWorkerWageSamples();
+            _workerWageSamplesDirty = false;
+        }
+
         return null;
     }
 
@@ -164,10 +207,10 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
         if (ImGui.TreeNode("Worker Wage Calibration"))
         {
-            ImGui.Text($"{Settings.WorkerWageSamples.Count} unique workers recorded");
+            ImGui.Text($"{WorkerWageSamples.Count} unique workers recorded");
             if (ImGui.Button("Reset calibration data"))
             {
-                Settings.WorkerWageSamples.Clear();
+                WorkerWageSamples.Clear();
                 _averageWorkerWagesDirty = true;
             }
 

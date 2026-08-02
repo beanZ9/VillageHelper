@@ -8,11 +8,7 @@ using SharpDX;
 
 namespace VillageHelper;
 
-public class WorkerWageSample
-{
-    public int WagePerHour { get; set; }
-    public Dictionary<string, int> JobRanks { get; set; } = new();
-}
+
 
 public class VillageHelperSettings : ISettings
 {
@@ -42,9 +38,6 @@ public class VillageHelperSettings : ISettings
 
     [JsonIgnore]
     public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
-    
-    [IgnoreMenu]
-    public Dictionary<string, WorkerWageSample> WorkerWageSamples { get; set; } = new();
 
     public bool WindowShown = true;
 }
