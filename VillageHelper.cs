@@ -108,6 +108,37 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         _workerWageSamplesDirty = true;
     }
     
+    private List<(TElement element, TWorker worker)> SafeJoinWorkersByName<TElement, TWorker>(
+        IEnumerable<TElement> elements, IEnumerable<TWorker> workers,
+        Func<TElement, bool> isVisible, Func<TElement, string> elementWorkerName, Func<TWorker, string> workerWorkerName)
+    {
+        try
+        {
+            var visibleElements = elements.Where(isVisible).ToList();
+            var workerList = workers.ToList();
+
+            var matches = visibleElements
+                .Join(workerList, elementWorkerName, workerWorkerName, (el, worker) => (element: el, worker))
+                .ToList();
+            
+            // Some workers display a WorkerName in the UI element that doesn't match the worker record
+            // (e.g. element says "Esile Waldegrave" but backing worker is "Esile Norene")
+            // attempt to match leftovers by position
+            var matchedElements = matches.Select(m => m.element).ToHashSet();
+            var matchedWorkers = matches.Select(m => m.worker).ToHashSet();
+            var leftoverElements = visibleElements.Where(el => !matchedElements.Contains(el));
+            var leftoverWorkers = workerList.Where(w => !matchedWorkers.Contains(w));
+            matches.AddRange(leftoverElements.Zip(leftoverWorkers));
+
+            return matches;
+        }
+        catch (Exception ex)
+        {
+            DebugWindow.LogError($"VillageHelper: failed to join worker elements: {ex}");
+            return [];
+        }
+    }
+
     private string WorkerWageSamplesPath => Path.Combine(ConfigDirectory, "WorkerWageSamples.json");
     private bool _workerWageSamplesDirty;
 
