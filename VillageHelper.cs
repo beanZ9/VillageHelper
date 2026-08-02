@@ -408,14 +408,12 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 })
             {
                 var existingWorkersByAssignedSkill = villageScreen.Workers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
-                foreach (var (workerElement, worker) in offeredWorkers.Where(x => x.IsVisible)
-                             .Join(villageScreen.WorkersForSale, x => x.WorkerName, x => x.WorkerName, (el, d) => (el, d)))
+                foreach (var (workerElement, worker) in SafeJoinWorkersByName(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, null, workersToReplace);
                 }
 
-                foreach (var (workerElement, worker) in currentWorkers.Where(x => x.IsVisible)
-                             .Join(villageScreen.Workers, x => x.WorkerName, x => x.WorkerName, (el, d) => (el, d)))
+                foreach (var (workerElement, worker) in SafeJoinWorkersByName(currentWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
@@ -429,23 +427,22 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 })
             {
                 var existingWorkersByAssignedSkill = villageScreen.Workers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
-                foreach (var (workerElement, worker) in availableWorkers.Where(x => x.IsVisible)
-                             .Join(villageScreen.Workers, x => x.WorkerName, x => x.WorkerName, (el, d) => (el, d)))
+                foreach (var (workerElement, worker) in SafeJoinWorkersByName(availableWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
 
-                foreach (var (workerElement, worker) in assignedWorkers.Where(x => x.IsVisible)
-                             .Join(villageScreen.Workers, x => x.WorkerName, x => x.WorkerName, (el, d) => (el, d)))
+                var visibleAssignedWorkers = SafeJoinWorkersByName(assignedWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName);
+                foreach (var (workerElement, worker) in visibleAssignedWorkers)
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, []);
                 }
 
                 if (workersToReplace.Any())
                 {
-                    foreach (var workerToReplace in assignedWorkers.Where(x => x.IsVisible).IntersectBy(workersToReplace, x => x.WorkerName))
+                    foreach (var (workerElement, worker) in visibleAssignedWorkers.Where(x => workersToReplace.Contains(x.worker.WorkerName)))
                     {
-                        Graphics.DrawFrame(workerToReplace.GetClientRectCache, Settings.BadColor, 3);
+                        Graphics.DrawFrame(workerElement.GetClientRectCache, Settings.BadColor, 3);
                     }
                 }
             }
