@@ -38,6 +38,8 @@ public class VillageHelperSettings : ISettings
     [JsonIgnore] public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
 
     [IgnoreMenu] public AutoRecruiterSettings AutoRecruiter { get; set; } = new AutoRecruiterSettings();
+    
+    public bool WindowShown = true;
 }
 
 public class AutoRecruiterSettings {
@@ -54,5 +56,4 @@ public class AutoRecruiterSettings {
     
     [IgnoreMenu] public Dictionary<string, VillageHelper.RecruiterJobTarget> Targets { get; set; } = new();
 
-    public bool WindowShown = true;
 }
