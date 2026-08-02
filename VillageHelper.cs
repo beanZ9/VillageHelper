@@ -17,7 +17,7 @@ using Vector2 = System.Numerics.Vector2;
 
 namespace VillageHelper;
 
-public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
+public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 {
     private TimeCache<List<DrawItem>> _overlayCache;
     private Dictionary<int, TimeSpan> _previousShipmentTimes;
@@ -367,6 +367,8 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         {
             _wageStats.Record(villageScreen.WorkersForSale);
         }
+
+        UpdateAutoRecruiter(villageScreen);
 
         var zoneLoadResources = villageScreen.ZoneLoadResources;
         if (Settings.WindowShown &&

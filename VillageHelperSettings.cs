@@ -35,8 +35,24 @@ public class VillageHelperSettings : ISettings
     public ColorNode NeutralColor { get; set; } = new ColorNode(Color.White);
     public ColorNode BadColor { get; set; } = new ColorNode(Color.Red);
 
-    [JsonIgnore]
-    public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
+    [JsonIgnore] public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
+
+    [IgnoreMenu] public AutoRecruiterSettings AutoRecruiter { get; set; } = new AutoRecruiterSettings();
+}
+
+public class AutoRecruiterSettings {
+    [IgnoreMenu] public ToggleNode UseHighQualityReroll { get; set; } = new ToggleNode(false);
+
+    [IgnoreMenu] public ToggleNode OnlyCostEfficient { get; set; } = new ToggleNode(true);
+
+    [IgnoreMenu]
+    public RangeNode<int> MaxGoldToSpend { get; set; } = new RangeNode<int>(100000, 0, 2000000);
+
+    [IgnoreMenu] public RangeNode<int> ClickDelayMs { get; set; } = new RangeNode<int>(150, 50, 2000);
+
+    [IgnoreMenu] public ToggleNode CancelWithRightMouseButton { get; set; } = new ToggleNode(true);
+    
+    [IgnoreMenu] public Dictionary<string, VillageHelper.RecruiterJobTarget> Targets { get; set; } = new();
 
     public bool WindowShown = true;
 }
