@@ -298,6 +298,28 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         return null;
     }
 
+    private string BuildWorkerStatsExport()
+    {
+        var text = "\n# gold per work unit\n# job,goldPerWorkUnit,samples,source\n";
+        foreach (var (jobId, stats) in _wageStats.AverageWorkerWages.OrderBy(x => x.Value.GoldPerWorkUnit))
+        {
+            text += $"{jobId},{stats.GoldPerWorkUnit:F3},{stats.SampleCount},{(stats.IsDefault ? "default value" : "measured")}\n";
+        }
+
+        text += "\n# job,rank,speed,samples,meanWage,sdWage\n";
+        foreach (var (jobId, byRank) in _wageStats.WageBuckets.OrderBy(x => x.Key))
+        {
+            foreach (var (rank, bucket) in byRank.OrderBy(x => x.Key).Where(x => x.Value.Count > 0))
+            {
+                var mean = bucket.SumWage / bucket.Count;
+                var sd = Math.Sqrt(Math.Max(0, bucket.SumWageSq / bucket.Count - mean * mean));
+                text += $"{jobId},{rank},{_wageStats.Speed(rank):F0},{bucket.Count},{mean:F1},{sd:F1}\n";
+            }
+        }
+
+        return text;
+    }
+
     public override void DrawSettings()
     {
         base.DrawSettings();
@@ -349,6 +371,12 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
             {
                 _wageStats.Reset();
             }
+
+            if (ImGui.Button("Copy wage data to clipboard"))
+            {
+                ImGui.SetClipboardText(BuildWorkerStatsExport());
+            }
+
             ImGui.TreePop();
         }
     }
@@ -368,7 +396,10 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
             _wageStats.Record(villageScreen.WorkersForSale);
         }
 
-        UpdateAutoRecruiter(villageScreen);
+        if (Settings.EnableAutoRecruiter) 
+        {
+            UpdateAutoRecruiter(villageScreen);
+        }
 
         var zoneLoadResources = villageScreen.ZoneLoadResources;
         if (Settings.WindowShown &&
@@ -700,8 +731,6 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 }
             }
 
-            // Summed, not Any() - a lost job type appears once per site (Discriminator), so several stranded
-            // workers spread over more than one entry would otherwise read the same as a single one.
             if (LostWorkerCount(villageScreen, "LostMapping") is > 0 and var lostMappers) {
                 result.Add(new DrawItem($"{lostMappers} MAPPER{(lostMappers > 1 ? "S" : "")} DEAD!", Settings.BadColor, Color.Black));
             }

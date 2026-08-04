@@ -3,7 +3,6 @@ using System.Windows.Forms;
 using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Nodes;
 using ExileCore.Shared.Interfaces;
-using Newtonsoft.Json;
 using SharpDX;
 
 namespace VillageHelper;
@@ -34,8 +33,8 @@ public class VillageHelperSettings : ISettings
     public ColorNode GoodColor { get; set; } = new ColorNode(Color.Green);
     public ColorNode NeutralColor { get; set; } = new ColorNode(Color.White);
     public ColorNode BadColor { get; set; } = new ColorNode(Color.Red);
-
-    [JsonIgnore] public ButtonNode ExportWorkerStats { get; set; } = new ButtonNode();
+    
+    public ToggleNode EnableAutoRecruiter { get; set; } = new ToggleNode(true);
 
     [IgnoreMenu] public AutoRecruiterSettings AutoRecruiter { get; set; } = new AutoRecruiterSettings();
     
@@ -50,10 +49,18 @@ public class AutoRecruiterSettings {
     [IgnoreMenu]
     public RangeNode<int> MaxGoldToSpend { get; set; } = new RangeNode<int>(100000, 0, 2000000);
 
-    [IgnoreMenu] public RangeNode<int> ClickDelayMs { get; set; } = new RangeNode<int>(150, 50, 2000);
+    [IgnoreMenu] public RangeNode<int> ClickDelayMs { get; set; } = new RangeNode<int>(500, 50, 2000);
 
     [IgnoreMenu] public ToggleNode CancelWithRightMouseButton { get; set; } = new ToggleNode(true);
     
-    [IgnoreMenu] public Dictionary<string, VillageHelper.RecruiterJobTarget> Targets { get; set; } = new();
-
+    [IgnoreMenu] public Dictionary<string, VillageHelper.RecruiterJobTarget> Targets { get; set; } = new()
+    {
+        ["Mining"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 12, AlwaysHireUpgrades = false },
+        ["Smelting"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 6, AlwaysHireUpgrades = false },
+        ["Farming"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 18, AlwaysHireUpgrades = false },
+        ["Disenchanting"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 6, AlwaysHireUpgrades = false },
+        ["Mapping"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 18, AlwaysHireUpgrades = true },
+        ["Shipping"] = new VillageHelper.RecruiterJobTarget { MinRank = 5, TargetQuantity = 6, AlwaysHireUpgrades = false },
+        ["Fishing"] = new VillageHelper.RecruiterJobTarget { MinRank = 1, TargetQuantity = 0, AlwaysHireUpgrades = false },
+    };
 }
