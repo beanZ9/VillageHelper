@@ -42,6 +42,15 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     }
 
     private static string NameHalfWageKey(string nameHalf, int wage) => nameHalf != null ? $"{nameHalf}|{wage}" : null;
+
+    private static string JobRanksKey(IEnumerable<KeyValuePair<VillageJobType, int>> jobRanks) =>
+        string.Join(",", jobRanks.Where(r => r.Key?.Id != null).OrderBy(r => r.Key.Id).Select(r => $"{r.Key.Id}:{r.Value}"));
+    
+    private static string WorkerDisplayIdentity(VillageWorker worker) =>
+        $"{worker.WorkerName}|{worker.WagePerHour}|{JobRanksKey(worker.JobRanks)}|{worker.Job.Type?.Id}";
+
+    private static string WorkerDisplayIdentity(VillageWorkerForSale worker) =>
+        $"{worker.WorkerName}|{worker.WagePerHour}|{JobRanksKey(worker.JobRanks)}";
     
     private static T TryReadElement<T>(Func<T> read)
     {
@@ -63,12 +72,13 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     private List<(TElement element, TWorker worker)> JoinWorkerElements<TElement, TWorker>(
         IEnumerable<TElement> elements, IEnumerable<TWorker> workers,
         Func<TElement, bool> isVisible, Func<TElement, string> elementWorkerName, Func<TWorker, string> workerWorkerName,
-        Func<TElement, string> elementWageText, Func<TWorker, int> workerWage)
+        Func<TElement, string> elementWageText, Func<TWorker, int> workerWage, Func<TWorker, string> workerIdentity,
+        Func<TElement, string> elementJobText = null, Func<TWorker, string> workerJobName = null)
     {
         var matches = new List<(TElement element, TWorker worker)>();
         try
         {
-            var pending = new List<(TElement Element, string Name, int Wage)>();
+            var pending = new List<(TElement Element, string Name, int Wage, string JobText)>();
             foreach (var element in elements)
             {
                 if (!TryReadElement(() => isVisible(element)))
@@ -76,17 +86,17 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     continue;
                 }
 
-                // both passes key on the wage, so an element missing either field is no use to us
+                // every pass keys on the wage, so an element missing name or wage is no use to us
                 if (TryReadElement(() => elementWorkerName(element)) is { } name &&
                     TryReadElement(() => TryParseWage(elementWageText(element))) is { } wage)
                 {
-                    pending.Add((element, name, wage));
+                    pending.Add((element, name, wage, elementJobText == null ? null : TryReadElement(() => elementJobText(element))));
                 }
             }
 
             var unclaimed = workers.ToList();
 
-            void MatchUniqueOn(Func<(TElement Element, string Name, int Wage), string> elementKey, Func<TWorker, string> workerKey)
+            void MatchUniqueOn(Func<(TElement Element, string Name, int Wage, string JobText), string> elementKey, Func<TWorker, string> workerKey)
             {
                 var workersByKey = unclaimed.GroupBy(workerKey).Where(g => g.Key != null && g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
                 var unambiguous = pending.GroupBy(elementKey).Where(g => g.Key != null && g.Count() == 1).Select(g => g.Single()).ToList();
@@ -100,15 +110,38 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     }
                 }
             }
+            
+            if (workerJobName != null)
+            {
+                MatchUniqueOn(p => p.JobText == null ? null : $"{p.Name}|{p.Wage}|{p.JobText}",
+                    w => $"{workerWorkerName(w)}|{workerWage(w)}|{workerJobName(w)}");
+            }
 
             MatchUniqueOn(p => $"{p.Name}|{p.Wage}", w => $"{workerWorkerName(w)}|{workerWage(w)}");
 
-            // only one half of the name seems to be wrong, so wage plus a single half should still get us the correct worker.
+            // on name mismatch only one of the two names seems to be wrong, so wage plus a single half should still get us the correct worker.
             // Some name tokens ("Aveline", "Norene", "Vonette", ..) can be either forename or surname).
             MatchUniqueOn(p => NameHalfWageKey(SplitName(p.Name).forename, p.Wage),
                 w => NameHalfWageKey(SplitName(workerWorkerName(w)).forename, workerWage(w)));
             MatchUniqueOn(p => NameHalfWageKey(SplitName(p.Name).surname, p.Wage),
                 w => NameHalfWageKey(SplitName(workerWorkerName(w)).surname, workerWage(w)));
+
+            // handle special case identical workers
+            foreach (var group in pending.GroupBy(p => $"{p.Name}|{p.Wage}").ToList())
+            {
+                var candidates = unclaimed.Where(w => $"{workerWorkerName(w)}|{workerWage(w)}" == group.Key).ToList();
+                if (candidates.Count == 0 || candidates.Select(workerIdentity).Distinct().Count() > 1)
+                {
+                    continue;
+                }
+
+                foreach (var (entry, worker) in group.Zip(candidates))
+                {
+                    matches.Add((entry.Element, worker));
+                    pending.Remove(entry);
+                    unclaimed.Remove(worker);
+                }
+            }
 
             return matches;
         }
@@ -364,13 +397,14 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 var hiredWorkers = villageScreen.Workers;
                 var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
                 foreach (var (workerElement, worker) in JoinWorkerElements(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour))
+                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, null, workersToReplace);
                 }
 
                 foreach (var (workerElement, worker) in JoinWorkerElements(currentWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour))
+                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
+                             x => x.Children[2].Children[1].Text, w => w.Job.Name))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
@@ -386,13 +420,15 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 var hiredWorkers = villageScreen.Workers;
                 var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
                 foreach (var (workerElement, worker) in JoinWorkerElements(availableWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                             x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour))
+                             x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
+                             x => x.Children[2].Children[0].Text, w => w.Job.Name))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
 
                 var visibleAssignedWorkers = JoinWorkerElements(assignedWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                    x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour);
+                    x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
+                    x => x.Children[2].Children[0].Text, w => w.Job.Name);
                 foreach (var (workerElement, worker) in visibleAssignedWorkers)
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, []);
