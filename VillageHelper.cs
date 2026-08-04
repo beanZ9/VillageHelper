@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using ExileCore;
 using ExileCore.PoEMemory;
@@ -11,7 +10,6 @@ using ExileCore.Shared.Cache;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Helpers;
 using ImGuiNET;
-using Newtonsoft.Json;
 using SharpDX;
 using Vector2 = System.Numerics.Vector2;
 
@@ -23,183 +21,130 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     private Dictionary<int, TimeSpan> _previousShipmentTimes;
     private readonly Dictionary<int, DateTime> _shipmentResetTimes = new ();
     private readonly Dictionary<int, TimeSpan> _shipmentResetValues = new ();
-    
-    public class WorkerWageSample
+
+    private static readonly HashSet<string> NonSkillJobTypes = ["Idling", "LostAtSea", "LostMapping"];
+
+    private static int? TryParseWage(string text)
     {
-        public int WagePerHour { get; set; }
-        public Dictionary<string, int> JobRanks { get; set; } = new();
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+
+        return int.TryParse(text.Replace(",", "").Replace("/h", ""), out var wage) ? wage : null;
     }
     
-    public Dictionary<string, WorkerWageSample> WorkerWageSamples { get; set; } = new();
-    private bool _averageWorkerWagesDirty = true;
-    private Dictionary<string, float> _averageWorkerWagesCache;
-
-    private Dictionary<string, float> AverageWorkerWages
+    // split worker names from ui elements into forename + surname, keeping in mind multi token surnames
+    private static (string forename, string surname) SplitName(string name)
     {
-        get
-        {
-            if (_averageWorkerWagesDirty)
-            {
-                _averageWorkerWagesCache = ComputeAverageWorkerWages();
-                _averageWorkerWagesDirty = false;
-            }
-
-            return _averageWorkerWagesCache;
-        }
+        var halves = (name ?? "").Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        return (halves.ElementAtOrDefault(0), halves.ElementAtOrDefault(1));
     }
 
-    private Dictionary<string, float> ComputeAverageWorkerWages()
-    {
-        var samples = WorkerWageSamples.Values.Where(s => s.JobRanks.Count > 0).ToList();
-
-        // Seed: use only single-skill-workers to establish a predictive average wage estimate for each job type
-        var k = new Dictionary<string, float>();
-        foreach (var group in samples.Where(s => s.JobRanks.Count == 1)
-                     .Select(s => (jobId: s.JobRanks.Keys.Single(),
-                         speed: (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(s.JobRanks.Values.Single()).Speed,
-                         wage: (float)s.WagePerHour))
-                     .GroupBy(x => x.jobId))
-        {
-            k[group.Key] = group.Sum(x => x.speed * x.wage) / group.Sum(x => x.speed * x.speed);
-        }
-
-        // Refine: classify every sample and resample until it settles. usually 1-2 runs. 5 max should be plenty here. job types are (at least rn) distinctive enough and if they were not, I guess it doesn't really matter, right? 
-        for (var pass = 0; pass < 5; pass++)
-        {
-            var sumSw = new Dictionary<string, float>();
-            var sumSs = new Dictionary<string, float>();
-
-            foreach (var sample in samples)
-            {
-                var (jobId, speed, _) = sample.JobRanks
-                    .Select(r => (jobId: r.Key, speed: (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed))
-                    .Select(x => (x.jobId, x.speed, predicted: k.GetValueOrDefault(x.jobId, 0f) * x.speed))
-                    .MaxBy(x => x.predicted);
-
-                sumSw[jobId] = sumSw.GetValueOrDefault(jobId) + speed * sample.WagePerHour;
-                sumSs[jobId] = sumSs.GetValueOrDefault(jobId) + speed * speed;
-            }
-
-            foreach (var jobId in sumSs.Keys)
-            {
-                if (sumSs[jobId] > 0)
-                {
-                    k[jobId] = sumSw[jobId] / sumSs[jobId];
-                }
-            }
-        }
-
-        return k;
-    }
-
-    private void RecordWorker(BaseVillageWorker worker)
-    {
-        if (WorkerWageSamples.ContainsKey(worker.WorkerName))
-        {
-            return;
-        }
-
-        WorkerWageSamples[worker.WorkerName] = new WorkerWageSample
-        {
-            WagePerHour = worker.WagePerHour,
-            JobRanks = worker.JobRanks.ToDictionary(r => r.Key.Id, r => r.Value),
-        };
-        _averageWorkerWagesDirty = true;
-        _workerWageSamplesDirty = true;
-    }
+    private static string NameHalfWageKey(string nameHalf, int wage) => nameHalf != null ? $"{nameHalf}|{wage}" : null;
     
-    private List<(TElement element, TWorker worker)> SafeJoinWorkersByName<TElement, TWorker>(
-        IEnumerable<TElement> elements, IEnumerable<TWorker> workers,
-        Func<TElement, bool> isVisible, Func<TElement, string> elementWorkerName, Func<TWorker, string> workerWorkerName)
+    private static T TryReadElement<T>(Func<T> read)
     {
         try
         {
-            var visibleElements = elements.Where(isVisible).ToList();
-            var workerList = workers.ToList();
+            return read();
+        }
+        catch
+        {
+            return default;
+        }
+    }
+    
 
-            var matches = visibleElements
-                .Join(workerList, elementWorkerName, workerWorkerName, (el, worker) => (element: el, worker))
-                .ToList();
-            
-            // Some workers display a WorkerName in the UI element that doesn't match the worker record
-            // (e.g. element says "Esile Waldegrave" but backing worker is "Esile Norene")
-            // attempt to match leftovers by position
-            var matchedElements = matches.Select(m => m.element).ToHashSet();
-            var matchedWorkers = matches.Select(m => m.worker).ToHashSet();
-            var leftoverElements = visibleElements.Where(el => !matchedElements.Contains(el));
-            var leftoverWorkers = workerList.Where(w => !matchedWorkers.Contains(w));
-            matches.AddRange(leftoverElements.Zip(leftoverWorkers));
+    // Some worker ui elements display a name that doesn't match their worker record (element says "Esile
+    // Waldegrave" but the backing worker is "Esile Norene")
+    // So we match on name and wage together first, then on wage plus either half of the name
+    // If we can't get an exact match, we skip
+    private List<(TElement element, TWorker worker)> JoinWorkerElements<TElement, TWorker>(
+        IEnumerable<TElement> elements, IEnumerable<TWorker> workers,
+        Func<TElement, bool> isVisible, Func<TElement, string> elementWorkerName, Func<TWorker, string> workerWorkerName,
+        Func<TElement, string> elementWageText, Func<TWorker, int> workerWage)
+    {
+        var matches = new List<(TElement element, TWorker worker)>();
+        try
+        {
+            var pending = new List<(TElement Element, string Name, int Wage)>();
+            foreach (var element in elements)
+            {
+                if (!TryReadElement(() => isVisible(element)))
+                {
+                    continue;
+                }
+
+                // both passes key on the wage, so an element missing either field is no use to us
+                if (TryReadElement(() => elementWorkerName(element)) is { } name &&
+                    TryReadElement(() => TryParseWage(elementWageText(element))) is { } wage)
+                {
+                    pending.Add((element, name, wage));
+                }
+            }
+
+            var unclaimed = workers.ToList();
+
+            void MatchUniqueOn(Func<(TElement Element, string Name, int Wage), string> elementKey, Func<TWorker, string> workerKey)
+            {
+                var workersByKey = unclaimed.GroupBy(workerKey).Where(g => g.Key != null && g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
+                var unambiguous = pending.GroupBy(elementKey).Where(g => g.Key != null && g.Count() == 1).Select(g => g.Single()).ToList();
+                foreach (var entry in unambiguous)
+                {
+                    if (workersByKey.TryGetValue(elementKey(entry), out var worker))
+                    {
+                        matches.Add((entry.Element, worker));
+                        pending.Remove(entry);
+                        unclaimed.Remove(worker);
+                    }
+                }
+            }
+
+            MatchUniqueOn(p => $"{p.Name}|{p.Wage}", w => $"{workerWorkerName(w)}|{workerWage(w)}");
+
+            // only one half of the name seems to be wrong, so wage plus a single half should still get us the correct worker.
+            // Some name tokens ("Aveline", "Norene", "Vonette", ..) can be either forename or surname).
+            MatchUniqueOn(p => NameHalfWageKey(SplitName(p.Name).forename, p.Wage),
+                w => NameHalfWageKey(SplitName(workerWorkerName(w)).forename, workerWage(w)));
+            MatchUniqueOn(p => NameHalfWageKey(SplitName(p.Name).surname, p.Wage),
+                w => NameHalfWageKey(SplitName(workerWorkerName(w)).surname, workerWage(w)));
 
             return matches;
         }
         catch (Exception ex)
         {
             DebugWindow.LogError($"VillageHelper: failed to join worker elements: {ex}");
-            return [];
+            return matches;
         }
     }
 
-    private string WorkerWageSamplesPath => Path.Combine(ConfigDirectory, "WorkerWageSamples.json");
-    private bool _workerWageSamplesDirty;
-
-    private void SaveWorkerWageSamples()
-    {
-        try
-        {
-            File.WriteAllText(WorkerWageSamplesPath, JsonConvert.SerializeObject(WorkerWageSamples, Formatting.Indented));
-        }
-        catch (Exception ex)
-        {
-            DebugWindow.LogError($"VillageHelper: failed to save worker wage samples: {ex}");
-        }
-    }
-
+    private WorkerWageStats _wageStats;
 
     public override bool Initialise()
     {
         GameController.LeftPanel.WantUse(() => true);
 
-        try
-        {
-            if (File.Exists(WorkerWageSamplesPath))
-            {
-                WorkerWageSamples = JsonConvert.DeserializeObject<Dictionary<string, WorkerWageSample>>(File.ReadAllText(WorkerWageSamplesPath)) ?? new();
-            }
-        }
-        catch (Exception ex)
-        {
-            DebugWindow.LogError($"VillageHelper: failed to load worker wage samples: {ex}");
-        }
+        _wageStats = new WorkerWageStats(GameController, ConfigDirectory);
 
         Settings.ExportWorkerStats.OnPressed += () =>
         {
-            var samplesByJob = new Dictionary<string, List<string>>();
-
-            foreach (var seen in WorkerWageSamples.Values)
+            var wages = _wageStats.AverageWorkerWages;
+            var text = "\n# gold per work unit\n# job,goldPerWorkUnit,samples,source\n";
+            foreach (var (jobId, stats) in wages.OrderBy(x => x.Value.GoldPerWorkUnit))
             {
-                if (seen.JobRanks.Count == 0 || !seen.JobRanks.Keys.All(AverageWorkerWages.ContainsKey))
-                {
-                    continue;
-                }
-
-                var (dominantJobId, _) = seen.JobRanks
-                    .Select(r => (jobId: r.Key, predicted: AverageWorkerWages[r.Key] * GameController.Game.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed))
-                    .MaxBy(x => x.predicted);
-
-                if (!samplesByJob.TryGetValue(dominantJobId, out var samples))
-                {
-                    samplesByJob[dominantJobId] = samples = [];
-                }
-
-                var speed = GameController.Game.Files.VillageJobSkillLevels.GetByLevel(seen.JobRanks[dominantJobId]).Speed;
-                samples.Add($"{{{speed},{seen.WagePerHour}}}");
+                text += $"{jobId},{stats.GoldPerWorkUnit:F3},{stats.SampleCount},{(stats.IsDefault ? "default value" : "measured")}\n";
             }
 
-            var text = $"# {WorkerWageSamples.Count} unique workers captured so far\n";
-            foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList)
+            text += "\n# job,rank,speed,samples,meanWage,sdWage\n";
+            foreach (var (jobId, byRank) in _wageStats.WageBuckets.OrderBy(x => x.Key))
             {
-                var samples = samplesByJob.GetValueOrDefault(jobType.Id, []);
-                text += $"{jobType.Id} {{{string.Join(",", samples)}}}\n";
+                foreach (var (rank, bucket) in byRank.OrderBy(x => x.Key).Where(x => x.Value.Count > 0))
+                {
+                    var mean = bucket.SumWage / bucket.Count;
+                    var sd = Math.Sqrt(Math.Max(0, bucket.SumWageSq / bucket.Count - mean * mean));
+                    text += $"{jobId},{rank},{_wageStats.Speed(rank):F0},{bucket.Count},{mean:F1},{sd:F1}\n";
+                }
             }
 
             ImGui.SetClipboardText(text);
@@ -223,46 +168,61 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     public override Job Tick()
     {
-        if (_workerWageSamplesDirty)
-        {
-            SaveWorkerWageSamples();
-            _workerWageSamplesDirty = false;
-        }
-
+        _wageStats.SaveIfDirty();
         return null;
     }
 
     public override void DrawSettings()
     {
         base.DrawSettings();
-
-        if (ImGui.TreeNode("Worker Wage Calibration"))
+        
+        // Wage data table in settings
+        if (ImGui.TreeNode("Worker Wage Data"))
         {
-            ImGui.Text($"{WorkerWageSamples.Count} unique workers recorded");
-            if (ImGui.Button("Reset calibration data"))
-            {
-                WorkerWageSamples.Clear();
-                _averageWorkerWagesDirty = true;
-            }
+            var averages = _wageStats.AverageWorkerWages;
+            ImGui.TextWrapped("A worker's wage is set by their highest paying skill. " +
+                              $"Average wages for each job type use preset values until there are at least {WorkerWageStats.MinCalibrationSamples} samples recorded.");
+            ImGui.Spacing();
 
-            var averages = AverageWorkerWages;
-            if (ImGui.BeginTable("AverageWorkerWagesTable", 2, ImGuiTableFlags.Borders))
+            if (ImGui.BeginTable("AverageWorkerWagesTable", 4, ImGuiTableFlags.Borders))
             {
                 ImGui.TableSetupColumn("Job");
                 ImGui.TableSetupColumn("Avg GPH/work unit");
+                ImGui.TableSetupColumn("Samples");
+                ImGui.TableSetupColumn("Source");
                 ImGui.TableHeadersRow();
-                foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList)
+                foreach (var jobType in GameController.Game.Files.VillageJobTypes.EntriesList.Where(x => !NonSkillJobTypes.Contains(x.Id)))
                 {
+                    var stats = jobType.Id != null ? averages.GetValueOrDefault(jobType.Id) : null;
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     ImGui.Text(jobType.Id);
                     ImGui.TableNextColumn();
-                    ImGui.Text(averages.TryGetValue(jobType.Id, out var avg) ? avg.ToString("F2") : "-");
+                    ImGui.Text(stats?.GoldPerWorkUnit.ToString("F2") ?? "-");
+                    ImGui.TableNextColumn();
+                    ImGui.Text(stats?.SampleCount.ToString() ?? "-");
+                    ImGui.TableNextColumn();
+                    if (stats is { IsDefault: true })
+                    {
+                        ImGui.TextColored(Settings.BadColor.Value.ToImguiVec4(), "preset");
+                    }
+                    else
+                    {
+                        ImGui.Text(stats == null ? "-" : "measured");
+                    }
                 }
 
                 ImGui.EndTable();
             }
 
+            ImGui.Text($"Wages recorded: {_wageStats.TotalWageSamples}");
+            ImGui.Spacing();
+            
+            ImGui.TextWrapped($"You can reset data here to recalibrate if GGG should decide to shuffle wages again.");
+            if (ImGui.Button("Reset calibration data"))
+            {
+                _wageStats.Reset();
+            }
             ImGui.TreePop();
         }
     }
@@ -276,17 +236,10 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
         var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
 
-        foreach (var worker in villageScreen.Workers)
-        {
-            RecordWorker(worker);
-        }
-
+        // capture every offered worker in the recruitment panel to build average wage data
         if (GameController.IngameState.IngameUi.VillageRecruitmentPanel is { IsVisible: true })
         {
-            foreach (var worker in villageScreen.WorkersForSale)
-            {
-                RecordWorker(worker);
-            }
+            _wageStats.Record(villageScreen.WorkersForSale);
         }
 
         var zoneLoadResources = villageScreen.ZoneLoadResources;
@@ -399,7 +352,8 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
         if (Settings.ShowWorkerUpgradeTips)
         {
-            HashSet<string> workersToReplace = [];
+            // address instead of name, names are not unique 
+            HashSet<long> workersToReplace = [];
             if (GameController.IngameState.IngameUi.VillageRecruitmentPanel is
                 {
                     IsVisible: true,
@@ -407,13 +361,16 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     CurrentWorkers: { } currentWorkers,
                 })
             {
-                var existingWorkersByAssignedSkill = villageScreen.Workers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
-                foreach (var (workerElement, worker) in SafeJoinWorkersByName(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
+                var hiredWorkers = villageScreen.Workers;
+                var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
+                foreach (var (workerElement, worker) in JoinWorkerElements(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, null, workersToReplace);
                 }
 
-                foreach (var (workerElement, worker) in SafeJoinWorkersByName(currentWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
+                foreach (var (workerElement, worker) in JoinWorkerElements(currentWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                             x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
@@ -426,13 +383,16 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     AssignedWorkers: { } assignedWorkers,
                 })
             {
-                var existingWorkersByAssignedSkill = villageScreen.Workers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
-                foreach (var (workerElement, worker) in SafeJoinWorkersByName(availableWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName))
+                var hiredWorkers = villageScreen.Workers;
+                var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
+                foreach (var (workerElement, worker) in JoinWorkerElements(availableWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                             x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour))
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
                 }
 
-                var visibleAssignedWorkers = SafeJoinWorkersByName(assignedWorkers, villageScreen.Workers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName);
+                var visibleAssignedWorkers = JoinWorkerElements(assignedWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                    x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour);
                 foreach (var (workerElement, worker) in visibleAssignedWorkers)
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, []);
@@ -440,7 +400,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
                 if (workersToReplace.Any())
                 {
-                    foreach (var (workerElement, worker) in visibleAssignedWorkers.Where(x => workersToReplace.Contains(x.worker.WorkerName)))
+                    foreach (var (workerElement, worker) in visibleAssignedWorkers.Where(x => workersToReplace.Contains(x.worker.Address)))
                     {
                         Graphics.DrawFrame(workerElement.GetClientRectCache, Settings.BadColor, 3);
                     }
@@ -566,7 +526,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                         }
 
                         if (showResetValue) {
-                            displayText = $"Shipment {resetValue:hh\\:mm} - Not moving?";
+                            displayText = $"Shipment {resetValue:hh\\:mm} - STUCK";
                             textColor = Settings.BadColor;
                         } else {
                             displayText = $"Shipment {remainingShipmentTime:hh\\:mm}";
@@ -630,14 +590,15 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     }
 
     private void ShowUpgradeTooltips(Dictionary<VillageJobType, List<VillageWorker>> existingWorkersByAssignedSkill, BaseVillageWorker worker, Element workerElement,
-        VillageJobType assignedJob, HashSet<string> workersToReplace)
+        VillageJobType assignedJob, HashSet<long> workersToReplace)
     {
         List<Action> tooltipActions = [];
         var indicatorType = 0;
         var moreLeftText = string.Empty;
-        var rankedRanks = worker.JobRanks.ToList();
-        var expectedWage = rankedRanks.Where(x => AverageWorkerWages.ContainsKey(x.Key.Id))
-            .ToDictionary(r => r.Key, r => AverageWorkerWages[r.Key.Id] * GameController.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed);
+        var wages = _wageStats.AverageWorkerWages;
+        var expectedWage = worker.JobRanks.Where(x => x.Key?.Id != null && wages.ContainsKey(x.Key.Id))
+            .ToDictionary(r => r.Key, r => wages[r.Key.Id].GoldPerWorkUnit * _wageStats.Speed(r.Value));
+        var anyDefaults = expectedWage.Keys.Any(x => wages[x.Id].IsDefault);
         if (expectedWage.Any())
         {
             tooltipActions.Add(() =>
@@ -653,31 +614,39 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     {
                         ImGui.TableNextRow();
                         ImGui.TableNextColumn();
-                        ImGui.Text(skill.Key.Id?.PadLeft(longestSkill) ?? "");
+                        ImGui.Text((skill.Key.Id?.PadLeft(longestSkill) ?? "") + (wages[skill.Key.Id].IsDefault ? " *" : ""));
                         ImGui.TableNextColumn();
                         ImGui.Text(skill.Value.ToString("F0").PadLeft(4));
                     }
 
                     ImGui.EndTable();
                 }
+
+                if (anyDefaults)
+                {
+                    ImGui.TextDisabled("* uncalibrated - still using the built-in default for this job");
+                }
             });
         }
 
-        if (rankedRanks.All(x => AverageWorkerWages.ContainsKey(x.Key.Id)))
+        // Only the best-paying skill matters here, so it's enough for that one job to have a wage estimate.
+        if (expectedWage.Any())
         {
             var maxWageSkill = expectedWage.MaxBy(x => x.Value);
-            if (!Equals(assignedJob, null) && !Equals(assignedJob.Id, "Idling") && !Equals(maxWageSkill.Key, assignedJob) &&
-                worker.WagePerHour > expectedWage.GetValueOrDefault(assignedJob, 0))
+            var assignedJobWage = assignedJob?.Id != null && wages.TryGetValue(assignedJob.Id, out var assignedStats)
+                ? expectedWage.GetValueOrDefault(assignedJob, assignedStats.GoldPerWorkUnit)
+                : 0;
+            if (assignedJob != null && !NonSkillJobTypes.Contains(assignedJob.Id) && !Equals(maxWageSkill.Key, assignedJob) &&
+                worker.WagePerHour > expectedWage.GetValueOrDefault(assignedJob, 0) && assignedJobWage > 0)
             {
                 tooltipActions.Add(() =>
                 {
-                    var overpayFactor = expectedWage[maxWageSkill.Key] / expectedWage.GetValueOrDefault(assignedJob, AverageWorkerWages[assignedJob.Id]);
+                    var overpayFactor = expectedWage[maxWageSkill.Key] / assignedJobWage;
                     ImGui.TextColored(Settings.BadColor.Value.ToImguiVec4(),
                         $"Bad assignment: assigned to {assignedJob.Id}, but paid ~{(overpayFactor - 1) * 100:F0}%% more due to their {maxWageSkill.Key.Id} level");
                 });
                 moreLeftText += "\nBAD ASSIGN";
             }
-
 
             moreLeftText += $"\nWage: {(worker.WagePerHour / maxWageSkill.Value - 1) * 100:+#;-#;0}%";
         }
@@ -695,7 +664,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 var gphPerWorkUnitString = "GPH/work unit";
                 if (upgradeList.Where(x => x.costPerPoint > costPerPoint).ToList() is { Count: > 0 } uList2)
                 {
-                    workersToReplace.Add(uList2[0].worker.WorkerName);
+                    workersToReplace.Add(uList2[0].worker.Address);
                     // recruitment panel only:
                     // show highest recommendation only on those worker offers whose highset paid job type is an upgrade to an existing worker of that job type
                     if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
@@ -738,7 +707,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                              return oldRank < candidateRank;
                          }).ToList() is { Count: > 0 } uList3)
                 {
-                    workersToReplace.Add(uList3[0].worker.WorkerName);
+                    workersToReplace.Add(uList3[0].worker.Address);
                     if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
                         indicatorType = Math.Max(indicatorType, 1);
                     }
