@@ -21,21 +21,28 @@ namespace VillageHelper;
 public partial class VillageHelper
 {
     public class RecruiterJobTarget {
-        internal int MinRank { get; set; }
-        internal int TargetQuantity { get; set; }
-        internal bool AlwaysHireUpgrades { get; set; }
+        public int MinRank { get; set; }
+        public int TargetQuantity { get; set; }
+        public bool AlwaysHireUpgrades { get; set; }
     }
     
     private VillageJobType GetDominantJob(IReadOnlyDictionary<VillageJobType, int> jobRanks)
     {
+        var wages = _wageStats.AverageWorkerWages;
         return jobRanks
-            .Select(r => (job: r.Key, predicted: AverageWorkerWages.GetValueOrDefault(r.Key.Id, 0f) * GameController.Game.Files.VillageJobSkillLevels.GetByLevel(r.Value).Speed))
+            .Where(r => r.Key?.Id != null)
+            .Select(r => (job: r.Key, predicted: (wages.TryGetValue(r.Key.Id, out var stats) ? stats.GoldPerWorkUnit : 0) * _wageStats.Speed(r.Value)))
             .MaxBy(x => x.predicted).job;
     }
 
-    // Exclude these pseudo job types
-    private static readonly HashSet<string> AutoRecruiterExcludedJobIds = ["Idling", "LostAtSea", "LostMapping"];
-    
+    private List<(VillageRecruitmentPanelWorkerElement element, VillageWorkerForSale worker)> GetVisibleOfferedWorkers(VillageScreen villageScreen)
+    {
+        return GameController.IngameState.IngameUi.VillageRecruitmentPanel is { IsVisible: true, OfferedWorkers: { } offeredWorkers }
+            ? JoinWorkerElements(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour)
+            : [];
+    }
+
     private const int RegularRerollCost = 2000;
     private const int HighQualityRerollCost = 16000;
 
@@ -52,8 +59,8 @@ public partial class VillageHelper
 
             if (Settings.AutoRecruiter.OnlyCostEfficient)
             {
-                var dominant = GetDominantJob(worker.JobRanks);
-                if (dominant.Id == jobId && worker.JobRanks[dominant] >= minRank)
+                if (GetDominantJob(worker.JobRanks) is { Id: { } dominantId } dominant &&
+                    dominantId == jobId && worker.JobRanks[dominant] >= minRank)
                 {
                     count++;
                 }
@@ -86,12 +93,12 @@ public partial class VillageHelper
 
             if (Settings.AutoRecruiter.OnlyCostEfficient)
             {
-                var dominant = GetDominantJob(worker.JobRanks);
-                if (neededJobIds.Contains(dominant.Id) &&
-                    Settings.AutoRecruiter.Targets.TryGetValue(dominant.Id, out var target) &&
+                if (GetDominantJob(worker.JobRanks) is { Id: { } dominantId } dominant &&
+                    neededJobIds.Contains(dominantId) &&
+                    Settings.AutoRecruiter.Targets.TryGetValue(dominantId, out var target) &&
                     worker.JobRanks[dominant] >= target.MinRank)
                 {
-                    return (element, dominant.Id, GetOfferedWorkerCost(element));
+                    return (element, dominantId, GetOfferedWorkerCost(element));
                 }
             }
             else
@@ -126,9 +133,9 @@ public partial class VillageHelper
                 continue;
             }
 
-            var dominant = GetDominantJob(worker.JobRanks);
-            if (!upgradeEnabledJobIds.Contains(dominant.Id) ||
-                !Settings.AutoRecruiter.Targets.TryGetValue(dominant.Id, out var target))
+            if (GetDominantJob(worker.JobRanks) is not { Id: { } dominantId } dominant ||
+                !upgradeEnabledJobIds.Contains(dominantId) ||
+                !Settings.AutoRecruiter.Targets.TryGetValue(dominantId, out var target))
             {
                 continue;
             }
@@ -142,7 +149,7 @@ public partial class VillageHelper
             var candidateCostPerPoint = worker.WagePerHour / (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(candidateRank).Speed;
             var isUpgrade = villageScreen.Workers.Any(existing =>
             {
-                if (existing.Job.Type.Id != dominant.Id)
+                if (existing.Job.Type?.Id != dominantId)
                 {
                     return false;
                 }
@@ -159,7 +166,7 @@ public partial class VillageHelper
 
             if (isUpgrade)
             {
-                return (element, dominant.Id, GetOfferedWorkerCost(element));
+                return (element, dominantId, GetOfferedWorkerCost(element));
             }
         }
 
@@ -293,13 +300,13 @@ public partial class VillageHelper
 
             var neededJobIds = GameController.Game.Files.VillageJobTypes.EntriesList
                 .Select(j => j.Id)
-                .Where(id => !AutoRecruiterExcludedJobIds.Contains(id) &&
+                .Where(id => !NonSkillJobTypes.Contains(id) &&
                              Settings.AutoRecruiter.Targets.TryGetValue(id, out var target) &&
                              target.TargetQuantity > GetCurrentWorkerCount(villageScreen, id, target.MinRank))
                 .ToHashSet();
 
             var upgradeEnabledJobIds = Settings.AutoRecruiter.Targets
-                .Where(kv => kv.Value.AlwaysHireUpgrades && !AutoRecruiterExcludedJobIds.Contains(kv.Key))
+                .Where(kv => kv.Value.AlwaysHireUpgrades && !NonSkillJobTypes.Contains(kv.Key))
                 .Select(kv => kv.Key)
                 .ToHashSet();
 
@@ -473,7 +480,7 @@ public partial class VillageHelper
                 
                 foreach (var (jobType, index) in GameController.Game.Files.VillageJobTypes.EntriesList.DistinctBy(j => j.Id).Select((j, i) => (j, i)))
                 {
-                    if (AutoRecruiterExcludedJobIds.Contains(jobType.Id))
+                    if (NonSkillJobTypes.Contains(jobType.Id))
                     {
                         continue;
                     }
@@ -483,7 +490,7 @@ public partial class VillageHelper
                         Settings.AutoRecruiter.Targets[jobType.Id] = target = new RecruiterJobTarget();
                     }
                     
-                    target.MinRank = Math.Clamp(target.MinRank, 0, 5);
+                    target.MinRank = Math.Clamp(target.MinRank, 1, 5);
 
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
@@ -494,7 +501,7 @@ public partial class VillageHelper
                     var minRank = target.MinRank;
                     if (ImGui.InputInt($"##rank_{index}", ref minRank))
                     {
-                        target.MinRank = Math.Clamp(minRank, 0, 5);
+                        target.MinRank = Math.Clamp(minRank, 1, 5);
                     }
                     ImGui.PopItemWidth();
                     
