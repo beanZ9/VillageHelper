@@ -578,6 +578,14 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 }
             }
 
+            if (villageScreen.WorkersByJob.Any(job => job.Key.Type.Id == "LostMapping" && job.Value.Count > 0)) {
+                result.Add(new DrawItem("MAPPER DEAD!", Settings.BadColor, Color.Black));
+            }
+            
+            if (villageScreen.WorkersByJob.Any(job => job.Key.Type.Id == "LostAtSea" && job.Value.Count > 0)) {
+                result.Add(new DrawItem("SAILOR DEAD!", Settings.BadColor, Color.Black));
+            }
+
             result.Add(
                 villageScreen.RemainingDisenchantmentTime <= TimeSpan.Zero
                     ? new DrawItem("DISENCHANTMENT EMPTY!", Settings.BadColor, Color.Black)
@@ -604,6 +612,7 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         var shipmentTextSize = new[]
         {
             Graphics.MeasureText("SHIPMENT 00:00!"),
+            Graphics.MeasureText("MAPPER DEAD!"),
             Graphics.MeasureText("DISENCHANTMENT EMPTY!"),
             Graphics.MeasureText("99999 gold (-99999/hr) 00:00"),
         }.MaxBy(x => x.X);
