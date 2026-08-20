@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using ExileCore;
 using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Components;
@@ -23,6 +25,12 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     private readonly Dictionary<int, TimeSpan> _shipmentResetValues = new ();
 
     private static readonly HashSet<string> NonSkillJobTypes = ["Idling", "LostAtSea", "LostMapping"];
+
+    private const string IdlingJobId = "Idling";
+
+    // Matched on Id rather than by key
+    private static int GetWorkerJobRank(BaseVillageWorker worker, VillageJobType job) =>
+        worker.JobRanks.FirstOrDefault(r => r.Key?.Id == job.Id).Value;
 
     private static int? TryParseWage(string text)
     {
@@ -153,34 +161,119 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     }
 
     private WorkerWageStats _wageStats;
+    
+    private static string FormatTable(string[] headers, List<string[]> rows)
+    {
+        var widths = headers.Select((h, i) => Math.Max(h.Length, rows.Count == 0 ? 0 : rows.Max(r => r[i].Length))).ToArray();
+        var rightAlign = Enumerable.Range(0, headers.Length)
+            .Select(i => rows.Count > 0 && rows.All(r => double.TryParse(r[i], NumberStyles.Any, CultureInfo.InvariantCulture, out _)))
+            .ToArray();
+
+        var table = new StringBuilder();
+        foreach (var row in rows.Prepend(headers))
+        {
+            table.AppendLine(string.Join("  ", row.Select((cell, i) => rightAlign[i] ? cell.PadLeft(widths[i]) : cell.PadRight(widths[i]))).TrimEnd());
+        }
+
+        return table.ToString();
+    }
+
+    private static bool? HasFreeSlot(VillageWorkerManagementPanel panel)
+    {
+        var workerLimitLabel = TryReadElement(() => panel.Children[0].Children[0].Children[1].Text)?.Split('/');
+        return workerLimitLabel is { Length: 2 } &&
+               int.TryParse(workerLimitLabel[0].Trim(), out var used) &&
+               int.TryParse(workerLimitLabel[1].Trim(), out var capacity) &&
+               capacity > 0
+            ? used < capacity
+            : null;
+    }
+
+    // Check if worker is worth assigning for recommendation highlight
+    private bool WorthAssigning(bool? hasFreeSlot, List<(VillageWorkerManagementPanelWorkerElement element, VillageWorker worker)> assignedWorkers,
+        VillageWorker candidate, VillageJobType panelJob)
+    {
+        if (hasFreeSlot is null or true)
+        {
+            return true;
+        }
+
+        GameController.IngameState.IngameUi.VillageScreen.CanBeEmployed(candidate.Job);
+        var candidateRank = GetWorkerJobRank(candidate, panelJob);
+        var candidateCostPerPoint = candidate.WagePerHour / _wageStats.Speed(candidateRank);
+
+        return assignedWorkers.Select(x => x.worker).Any(assigned =>
+        {
+            if (HighestPaidSkill(assigned)?.Id != panelJob.Id)
+            {
+                return true;
+            }
+
+            // Same as ShowUpgradeTooltips()
+            var assignedRank = GetWorkerJobRank(assigned, panelJob);
+            return assignedRank < candidateRank ||
+                   (assignedRank <= candidateRank && assigned.WagePerHour / _wageStats.Speed(assignedRank) > candidateCostPerPoint);
+        });
+    }
+
+    // With the setting on we only recommend a worker for the skill their wage is actually being paid for.
+    private bool IsRecommendedFor(VillageJobType candidateJob, Dictionary<VillageJobType, double> expectedWage) =>
+        !Settings.ShowOnlyCostEfficientUpgrades || candidateJob == expectedWage.MaxBy(x => x.Value).Key;
+    
+    private VillageJobType HighestPaidSkill(BaseVillageWorker worker)
+    {
+        var wages = _wageStats.AverageWorkerWages;
+        return worker.JobRanks
+            .Where(r => r.Key?.Id != null && wages.ContainsKey(r.Key.Id))
+            .Select(r => (job: r.Key, predicted: wages[r.Key.Id].GoldPerWorkUnit * _wageStats.Speed(r.Value)))
+            .MaxBy(x => x.predicted).job;
+    }
 
     public override bool Initialise()
     {
         GameController.LeftPanel.WantUse(() => true);
-
+        
         _wageStats = new WorkerWageStats(GameController, ConfigDirectory);
 
         Settings.ExportWorkerStats.OnPressed += () =>
         {
-            var wages = _wageStats.AverageWorkerWages;
-            var text = "\n# gold per work unit\n# job,goldPerWorkUnit,samples,source\n";
-            foreach (var (jobId, stats) in wages.OrderBy(x => x.Value.GoldPerWorkUnit))
-            {
-                text += $"{jobId},{stats.GoldPerWorkUnit:F3},{stats.SampleCount},{(stats.IsDefault ? "default value" : "measured")}\n";
-            }
-
-            text += "\n# job,rank,speed,samples,meanWage,sdWage\n";
-            foreach (var (jobId, byRank) in _wageStats.WageBuckets.OrderBy(x => x.Key))
-            {
-                foreach (var (rank, bucket) in byRank.OrderBy(x => x.Key).Where(x => x.Value.Count > 0))
+            var wageRows = _wageStats.AverageWorkerWages
+                .OrderBy(x => x.Value.GoldPerWorkUnit)
+                .Select(x => new[]
                 {
-                    var mean = bucket.SumWage / bucket.Count;
-                    var sd = Math.Sqrt(Math.Max(0, bucket.SumWageSq / bucket.Count - mean * mean));
-                    text += $"{jobId},{rank},{_wageStats.Speed(rank):F0},{bucket.Count},{mean:F1},{sd:F1}\n";
-                }
-            }
+                    x.Key,
+                    x.Value.GoldPerWorkUnit.ToString("F3", CultureInfo.InvariantCulture),
+                    x.Value.SampleCount.ToString(CultureInfo.InvariantCulture),
+                    x.Value.IsDefault ? "default" : "measured",
+                })
+                .ToList();
 
-            ImGui.SetClipboardText(text);
+            var bucketRows = _wageStats.WageBuckets
+                .OrderBy(x => x.Key)
+                .SelectMany(job => job.Value
+                    .OrderBy(x => x.Key)
+                    .Where(x => x.Value.Count > 0)
+                    .Select(rank =>
+                    {
+                        var mean = rank.Value.SumWage / rank.Value.Count;
+                        var sd = Math.Sqrt(Math.Max(0, rank.Value.SumWageSq / rank.Value.Count - mean * mean));
+                        return new[]
+                        {
+                            job.Key,
+                            rank.Key.ToString(CultureInfo.InvariantCulture),
+                            _wageStats.Speed(rank.Key).ToString("F0", CultureInfo.InvariantCulture),
+                            rank.Value.Count.ToString(CultureInfo.InvariantCulture),
+                            mean.ToString("F1", CultureInfo.InvariantCulture),
+                            sd.ToString("F1", CultureInfo.InvariantCulture),
+                        };
+                    }))
+                .ToList();
+
+            ImGui.SetClipboardText(
+                "# gold per work unit\n" +
+                FormatTable(["job", "gphPerWorkUnit", "samples", "source"], wageRows) +
+                "\n# samples per job and rank\n" +
+                FormatTable(["job", "rank", "speed", "samples", "meanWage", "sdWage"], bucketRows));
         };
 
         _overlayCache = new TimeCache<List<DrawItem>>(() =>
@@ -395,7 +488,9 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 })
             {
                 var hiredWorkers = villageScreen.Workers;
-                var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
+                var existingWorkersByAssignedSkill = hiredWorkers
+                    .GroupBy(x => x.Job.Type)
+                    .ToDictionary(x => x.Key, x => x.ToList());
                 foreach (var (workerElement, worker) in JoinWorkerElements(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
                              x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity))
                 {
@@ -415,31 +510,57 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     IsVisible: true,
                     AvailableWorkers: { } availableWorkers,
                     AssignedWorkers: { } assignedWorkers,
-                })
+                } managementPanel)
             {
                 var hiredWorkers = villageScreen.Workers;
                 var existingWorkersByAssignedSkill = hiredWorkers.GroupBy(x => x.Job.Type).ToDictionary(x => x.Key, x => x.ToList());
-                foreach (var (workerElement, worker) in JoinWorkerElements(availableWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                             x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
-                             x => x.Children[2].Children[0].Text, w => w.Job.Name))
-                {
-                    ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
-                }
+                var hasFreeSlot = HasFreeSlot(managementPanel);
 
                 var visibleAssignedWorkers = JoinWorkerElements(assignedWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
                     x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
                     x => x.Children[2].Children[0].Text, w => w.Job.Name);
+
+                // Get job type of current panel from assigned worker's job type
+                var panelJob = visibleAssignedWorkers
+                    .Select(x => x.worker.Job.Type)
+                    .Where(t => t?.Id != null && !NonSkillJobTypes.Contains(t.Id))
+                    .GroupBy(t => t.Id)
+                    .MaxBy(g => g.Count())?.First();
+
+                var visibleAvailableWorkers = JoinWorkerElements(availableWorkers, hiredWorkers, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
+                    x => x.Children[3].Children[0].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity,
+                    x => x.Children[2].Children[0].Text, w => w.Job.Name);
+                foreach (var (workerElement, worker) in visibleAvailableWorkers)
+                {
+                    ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, workersToReplace);
+                }
+
                 foreach (var (workerElement, worker) in visibleAssignedWorkers)
                 {
                     ShowUpgradeTooltips(existingWorkersByAssignedSkill, worker, workerElement, worker.Job.Type, []);
                 }
 
-                if (workersToReplace.Any())
+                // highlight workers recommended to unassign for better alternatives
+                if (hasFreeSlot != true && workersToReplace.Any())
                 {
                     foreach (var (workerElement, worker) in visibleAssignedWorkers.Where(x => workersToReplace.Contains(x.worker.Address)))
                     {
                         Graphics.DrawFrame(workerElement.GetClientRectCache, Settings.BadColor, 3);
                     }
+                }
+
+                // highlight workers recommended to assign - idle only
+                if (panelJob != null &&
+                    hiredWorkers
+                        .Where(w => w.Job.Type?.Id == IdlingJobId && GetWorkerJobRank(w, panelJob) > 0 &&
+                                    (!Settings.ShowOnlyCostEfficientUpgrades || HighestPaidSkill(w)?.Id == panelJob.Id))
+                        .OrderByDescending(w => GetWorkerJobRank(w, panelJob))
+                        .ThenBy(w => w.WagePerHour / _wageStats.Speed(GetWorkerJobRank(w, panelJob)))
+                        .FirstOrDefault() is { } bestIdle &&
+                    WorthAssigning(hasFreeSlot, visibleAssignedWorkers, bestIdle, panelJob) &&
+                    visibleAvailableWorkers.FirstOrDefault(x => x.worker.Address == bestIdle.Address) is { element: not null } bestRow)
+                {
+                    Graphics.DrawFrame(bestRow.element.GetClientRectCache, Settings.GoodColor, 3);
                 }
             }
         }
@@ -513,6 +634,9 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     private record DrawItem(string Text, Color Color, Color BackgroundColor);
 
+    private static int LostWorkerCount(VillageScreen villageScreen, string lostJobTypeId) =>
+        villageScreen.WorkersByJob.Where(job => job.Key?.Type?.Id == lostJobTypeId).Sum(job => job.Value.Count);
+
     private List<DrawItem> ComputeStatusOverlayDrawItems(VillageScreen villageScreen, int villageGold)
     {
         var result = new List<DrawItem>();
@@ -574,12 +698,14 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 }
             }
 
-            if (villageScreen.WorkersByJob.Any(job => job.Key.Type.Id == "LostMapping" && job.Value.Count > 0)) {
-                result.Add(new DrawItem("MAPPER DEAD!", Settings.BadColor, Color.Black));
+            // Summed, not Any() - a lost job type appears once per site (Discriminator), so several stranded
+            // workers spread over more than one entry would otherwise read the same as a single one.
+            if (LostWorkerCount(villageScreen, "LostMapping") is > 0 and var lostMappers) {
+                result.Add(new DrawItem($"{lostMappers} MAPPER{(lostMappers > 1 ? "S" : "")} DEAD!", Settings.BadColor, Color.Black));
             }
-            
-            if (villageScreen.WorkersByJob.Any(job => job.Key.Type.Id == "LostAtSea" && job.Value.Count > 0)) {
-                result.Add(new DrawItem("SAILOR DEAD!", Settings.BadColor, Color.Black));
+
+            if (LostWorkerCount(villageScreen, "LostAtSea") is > 0 and var lostSailors) {
+                result.Add(new DrawItem($"{lostSailors} SAILOR{(lostSailors > 1 ? "S" : "")} DEAD!", Settings.BadColor, Color.Black));
             }
 
             result.Add(
@@ -663,11 +789,8 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                     ImGui.TextDisabled("* uncalibrated - still using the built-in default for this job");
                 }
             });
-        }
-
-        // Only the best-paying skill matters here, so it's enough for that one job to have a wage estimate.
-        if (expectedWage.Any())
-        {
+            
+            // Only the best-paying skill matters here, so it's enough for that one job to have a wage estimate.
             var maxWageSkill = expectedWage.MaxBy(x => x.Value);
             var assignedJobWage = assignedJob?.Id != null && wages.TryGetValue(assignedJob.Id, out var assignedStats)
                 ? expectedWage.GetValueOrDefault(assignedJob, assignedStats.GoldPerWorkUnit)
@@ -700,12 +823,12 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                 var gphPerWorkUnitString = "GPH/work unit";
                 if (upgradeList.Where(x => x.costPerPoint > costPerPoint).ToList() is { Count: > 0 } uList2)
                 {
-                    workersToReplace.Add(uList2[0].worker.Address);
-                    // recruitment panel only:
-                    // show highest recommendation only on those worker offers whose highset paid job type is an upgrade to an existing worker of that job type
-                    if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
+                    if (IsRecommendedFor(candidateRankType, expectedWage))
+                    {
+                        workersToReplace.Add(uList2[0].worker.Address);
                         indicatorType = Math.Max(indicatorType, 2);
                     }
+
                     var longestWorkerName = uList2.Max(x => x.worker.WorkerName.Length);
                     tooltipActions.Add(() =>
                     {
@@ -743,10 +866,12 @@ public class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
                              return oldRank < candidateRank;
                          }).ToList() is { Count: > 0 } uList3)
                 {
-                    workersToReplace.Add(uList3[0].worker.Address);
-                    if (candidateRankType == expectedWage.MaxBy(x => x.Value).Key || assignedJob != null || !Settings.RecommendOnlyCostEfficientRecruits) {
+                    if (IsRecommendedFor(candidateRankType, expectedWage))
+                    {
+                        workersToReplace.Add(uList3[0].worker.Address);
                         indicatorType = Math.Max(indicatorType, 1);
                     }
+
                     var longestWorkerName = uList3.Max(x => x.worker.WorkerName.Length);
                     tooltipActions.Add(() =>
                     {

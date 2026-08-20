@@ -8,8 +8,6 @@ using SharpDX;
 
 namespace VillageHelper;
 
-
-
 public class VillageHelperSettings : ISettings
 {
     //Mandatory setting to allow enabling/disabling your plugin
@@ -28,10 +26,11 @@ public class VillageHelperSettings : ISettings
     public ToggleNode ShowProjectedCurrentGold { get; set; } = new ToggleNode(false);
 
     public ToggleNode ShowWorkerUpgradeTips { get; set; } = new ToggleNode(true);
-    [Menu("Recommend Only Cost Efficient Recruits", "In the recruitment panel only show the green recommendation badge\n" +
-                                                    "on workers when the skill that is an upgrade to an existing worker is also their \n" +
-                                                    "highest paid skill. Avoids overpaying workers by wage but increases reroll cost.")]
-    public ToggleNode RecommendOnlyCostEfficientRecruits { get; set; } = new ToggleNode(false);
+    [Menu("Show Only Cost Efficient Upgrade Tips", "Base upgrade recommendations only on a worker's highest paid skill.\n" +
+                                                   "A worker who is an upgrade at some cheaper skill is still being paid full wage for" +
+                                                   "their most expensive skill.\n" +
+                                                   "Avoids overpaying wage but consequently can increase reroll cost initially.")]
+    public ToggleNode ShowOnlyCostEfficientUpgrades { get; set; } = new ToggleNode(true);
     public ColorNode GoodColor { get; set; } = new ColorNode(Color.Green);
     public ColorNode NeutralColor { get; set; } = new ColorNode(Color.White);
     public ColorNode BadColor { get; set; } = new ColorNode(Color.Red);
