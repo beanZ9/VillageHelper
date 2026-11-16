@@ -81,7 +81,50 @@ public partial class VillageHelper
         return int.Parse(offeredWorkerElement.Children[0].Children[1].Children[0].Text.Replace(",", ""));
     }
 
-    private (Element element, string jobId, int cost)? FindHireCandidate(VillageScreen villageScreen, HashSet<string> neededJobIds)
+    private record HireCandidate(Element Element, VillageWorkerForSale Worker, string JobId, int Cost);
+
+    // True while the element still shows exactly the worker we decided to hire. Offers can refresh (late reroll
+    // response, list shifting after a hire) between picking a candidate and clicking, and the click would then
+    // hire whoever sits in that slot now.
+    private bool IsStillOffered(HireCandidate candidate)
+    {
+        var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
+        var identity = WorkerDisplayIdentity(candidate.Worker);
+        return TryReadElement(() => GetVisibleOfferedWorkers(villageScreen)
+            .Any(x => x.element.Address == candidate.Element.Address && WorkerDisplayIdentity(x.worker) == identity));
+    }
+
+    private string OfferedWorkersSnapshot()
+    {
+        var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
+        return TryReadElement(() =>
+            $"{villageScreen.Workers.Count}|{string.Join(";", villageScreen.WorkersForSale.Select(w => WorkerDisplayIdentity(w)).Order())}");
+    }
+
+    // After a hire or reroll, wait until the game reflects it before evaluating offers again.
+    private async SyncTask<bool> WaitForOffersToChange(string before, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (AutoRecruiterCancelRequested)
+            {
+                return false;
+            }
+
+            if (OfferedWorkersSnapshot() is { } now && now != before)
+            {
+                return true;
+            }
+
+            await TaskUtils.NextFrame();
+        }
+
+        // Timed out: carry on, the pre-click check still guards the next hire
+        return true;
+    }
+
+    private HireCandidate FindHireCandidate(VillageScreen villageScreen, HashSet<string> neededJobIds)
     {
         foreach (var (element, worker) in GetVisibleOfferedWorkers(villageScreen))
         {
@@ -97,7 +140,7 @@ public partial class VillageHelper
                     Settings.AutoRecruiter.Targets.TryGetValue(dominantId, out var target) &&
                     worker.JobRanks[dominant] >= target.MinRank)
                 {
-                    return (element, dominantId, GetOfferedWorkerCost(element));
+                    return new HireCandidate(element, worker, dominantId, GetOfferedWorkerCost(element));
                 }
             }
             else
@@ -108,7 +151,7 @@ public partial class VillageHelper
                         Settings.AutoRecruiter.Targets.TryGetValue(job.Id, out var target) &&
                         rank >= target.MinRank)
                     {
-                        return (element, job.Id, GetOfferedWorkerCost(element));
+                        return new HireCandidate(element, worker, job.Id, GetOfferedWorkerCost(element));
                     }
                 }
             }
@@ -118,7 +161,7 @@ public partial class VillageHelper
     }
 
     // Find possible worker upgrades from offers
-    private (Element element, string jobId, int cost)? FindUpgradeCandidate(VillageScreen villageScreen, HashSet<string> upgradeEnabledJobIds)
+    private HireCandidate FindUpgradeCandidate(VillageScreen villageScreen, HashSet<string> upgradeEnabledJobIds)
     {
         if (upgradeEnabledJobIds.Count == 0)
         {
@@ -172,7 +215,7 @@ public partial class VillageHelper
 
             if (isUpgrade)
             {
-                return (element, dominantId, GetOfferedWorkerCost(element));
+                return new HireCandidate(element, worker, dominantId, GetOfferedWorkerCost(element));
             }
         }
 
@@ -193,37 +236,56 @@ public partial class VillageHelper
 
     private bool AutoRecruiterCancelRequested => Settings.AutoRecruiter.CancelWithRightMouseButton && (Control.MouseButtons & MouseButtons.Right) != 0;
 
-    private async SyncTask<bool> ClickElement(Element element, bool holdCtrl)
+    private enum ClickResult { Clicked, Cancelled, Skipped }
+
+    private async SyncTask<ClickResult> ClickElement(Element element, bool holdCtrl, Func<bool> verifyBeforeClick = null, bool rightHalfOnly = false)
     {
+        var clickRect = element.GetClientRectCache;
+        if (rightHalfOnly)
+        {
+            // Ctrl-clicking the rank icons (lower left of a worker card) does nothing, so stay in the right half
+            clickRect = new RectangleF(clickRect.X + clickRect.Width / 2, clickRect.Y, clickRect.Width / 2, clickRect.Height);
+        }
+
         if (holdCtrl)
         {
             Input.KeyDown(Keys.LControlKey);
-            await WaitFor(TimeSpan.FromMilliseconds(10));
         }
 
-        Input.SetCursorPos(element.GetClientRectCache.ClickRandomNum(x: 5, y: 5));
-        await WaitFor(TimeSpan.FromMilliseconds(Settings.AutoRecruiter.ClickDelayMs));
+        try
+        {
+            if (holdCtrl)
+            {
+                await WaitFor(TimeSpan.FromMilliseconds(10));
+            }
 
-        if (AutoRecruiterCancelRequested)
+            Input.SetCursorPos(clickRect.ClickRandomNum(x: 5, y: 5));
+            await WaitFor(TimeSpan.FromMilliseconds(Settings.AutoRecruiter.ClickDelayMs));
+
+            if (AutoRecruiterCancelRequested)
+            {
+                return ClickResult.Cancelled;
+            }
+
+            if (verifyBeforeClick != null && !verifyBeforeClick())
+            {
+                return ClickResult.Skipped;
+            }
+
+            Input.Click(MouseButtons.Left);
+            await WaitFor(TimeSpan.FromMilliseconds(25));
+            return ClickResult.Clicked;
+        }
+        finally
         {
             if (holdCtrl)
             {
                 Input.KeyUp(Keys.LControlKey);
             }
-
-            return false;
         }
-
-        Input.Click(MouseButtons.Left);
-        await WaitFor(TimeSpan.FromMilliseconds(25));
-
-        if (holdCtrl)
-        {
-            Input.KeyUp(Keys.LControlKey);
-        }
-
-        return true;
     }
+
+    private static readonly TimeSpan OfferRefreshTimeout = TimeSpan.FromSeconds(2);
     
     private const int AutoRecruiterIdleMouseDelayMs = 500;
 
@@ -326,20 +388,28 @@ public partial class VillageHelper
 
             var candidate = FindHireCandidate(villageScreen, neededJobIds) ?? FindUpgradeCandidate(villageScreen, upgradeEnabledJobIds);
 
-            bool clicked;
+            var snapshotBeforeClick = OfferedWorkersSnapshot();
+            ClickResult result;
             if (candidate is { } found)
             {
-                if (_autoRecruiterGoldSpent + found.cost > Settings.AutoRecruiter.MaxGoldToSpend)
+                if (_autoRecruiterGoldSpent + found.Cost > Settings.AutoRecruiter.MaxGoldToSpend)
                 {
                     _autoRecruiterRunning = false;
                     _autoRecruiterStopReason = "Gold limit reached";
                     return false;
                 }
 
-                clicked = await ClickElement(found.element, true);
-                if (clicked)
+                result = await ClickElement(found.Element, true, () => IsStillOffered(found), rightHalfOnly: true);
+                if (result == ClickResult.Clicked)
                 {
-                    _autoRecruiterGoldSpent += found.cost;
+                    _autoRecruiterGoldSpent += found.Cost;
+                    DebugWindow.LogMsg($"Village Helper: hired {found.Worker.WorkerName} for {found.JobId} " +
+                                       $"(rank {found.Worker.JobRanks.FirstOrDefault(r => r.Key?.Id == found.JobId).Value}, {found.Cost} gold)");
+                }
+                else if (result == ClickResult.Skipped)
+                {
+                    // offers changed under the cursor; re-evaluate them instead of clicking blind
+                    continue;
                 }
             }
             else
@@ -353,14 +423,15 @@ public partial class VillageHelper
                 }
 
                 var rerollButton = Settings.AutoRecruiter.UseHighQualityReroll ? HighQualityRerollButton : RegularRerollButton;
-                clicked = await ClickElement(rerollButton, false);
-                if (clicked)
+                result = await ClickElement(rerollButton, false);
+                if (result == ClickResult.Clicked)
                 {
                     _autoRecruiterGoldSpent += rerollCost;
                 }
             }
 
-            if (!clicked)
+            if (result != ClickResult.Clicked ||
+                !await WaitForOffersToChange(snapshotBeforeClick, OfferRefreshTimeout))
             {
                 _autoRecruiterRunning = false;
                 _autoRecruiterStopReason = "Cancelled by user";
