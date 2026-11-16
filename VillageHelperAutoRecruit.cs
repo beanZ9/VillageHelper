@@ -153,13 +153,20 @@ public partial class VillageHelper
                     return false;
                 }
 
-                var existingRank = existing.JobRanks.GetValueOrDefault(existing.Job.Type, 0);
+                // matched on Id: looking up by the Job.Type instance can miss and read as rank 0
+                var existingRank = GetWorkerJobRank(existing, existing.Job.Type);
                 if (existingRank > candidateRank)
                 {
                     return false;
                 }
 
-                var existingCostPerPoint = existing.WagePerHour / (float)GameController.Game.Files.VillageJobSkillLevels.GetByLevel(existingRank).Speed;
+                var existingSpeed = GameController.Game.Files.VillageJobSkillLevels.GetByLevel(existingRank)?.Speed ?? 0;
+                if (existingSpeed <= 0)
+                {
+                    return true;
+                }
+
+                var existingCostPerPoint = existing.WagePerHour / (float)existingSpeed;
                 return existingCostPerPoint > candidateCostPerPoint;
             });
 
