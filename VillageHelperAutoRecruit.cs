@@ -39,7 +39,7 @@ public partial class VillageHelper
     {
         return GameController.IngameState.IngameUi.VillageRecruitmentPanel is { IsVisible: true, OfferedWorkers: { } offeredWorkers }
             ? JoinWorkerElements(offeredWorkers, villageScreen.WorkersForSale, x => x.IsVisible, x => x.WorkerName, w => w.WorkerName,
-                x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour)
+                x => x.Children[3].Children[1].Children[0].Text, w => w.WagePerHour, WorkerDisplayIdentity)
             : [];
     }
 
