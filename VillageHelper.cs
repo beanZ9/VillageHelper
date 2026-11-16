@@ -11,7 +11,6 @@ using ExileCore.PoEMemory.FilesInMemory.Village;
 using ExileCore.Shared.Cache;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Helpers;
-using ImGuiNET;
 using SharpDX;
 using Vector2 = System.Numerics.Vector2;
 
