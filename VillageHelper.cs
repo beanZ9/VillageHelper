@@ -235,47 +235,6 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
         
         _wageStats = new WorkerWageStats(GameController, ConfigDirectory);
 
-        Settings.ExportWorkerStats.OnPressed += () =>
-        {
-            var wageRows = _wageStats.AverageWorkerWages
-                .OrderBy(x => x.Value.GoldPerWorkUnit)
-                .Select(x => new[]
-                {
-                    x.Key,
-                    x.Value.GoldPerWorkUnit.ToString("F3", CultureInfo.InvariantCulture),
-                    x.Value.SampleCount.ToString(CultureInfo.InvariantCulture),
-                    x.Value.IsDefault ? "default" : "measured",
-                })
-                .ToList();
-
-            var bucketRows = _wageStats.WageBuckets
-                .OrderBy(x => x.Key)
-                .SelectMany(job => job.Value
-                    .OrderBy(x => x.Key)
-                    .Where(x => x.Value.Count > 0)
-                    .Select(rank =>
-                    {
-                        var mean = rank.Value.SumWage / rank.Value.Count;
-                        var sd = Math.Sqrt(Math.Max(0, rank.Value.SumWageSq / rank.Value.Count - mean * mean));
-                        return new[]
-                        {
-                            job.Key,
-                            rank.Key.ToString(CultureInfo.InvariantCulture),
-                            _wageStats.Speed(rank.Key).ToString("F0", CultureInfo.InvariantCulture),
-                            rank.Value.Count.ToString(CultureInfo.InvariantCulture),
-                            mean.ToString("F1", CultureInfo.InvariantCulture),
-                            sd.ToString("F1", CultureInfo.InvariantCulture),
-                        };
-                    }))
-                .ToList();
-
-            ImGui.SetClipboardText(
-                "# gold per work unit\n" +
-                FormatTable(["job", "gphPerWorkUnit", "samples", "source"], wageRows) +
-                "\n# samples per job and rank\n" +
-                FormatTable(["job", "rank", "speed", "samples", "meanWage", "sdWage"], bucketRows));
-        };
-
         _overlayCache = new TimeCache<List<DrawItem>>(() =>
         {
             var villageScreen = GameController.IngameState.IngameUi.VillageScreen;
@@ -300,23 +259,43 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
 
     private string BuildWorkerStatsExport()
     {
-        var text = "\n# gold per work unit\n# job,goldPerWorkUnit,samples,source\n";
-        foreach (var (jobId, stats) in _wageStats.AverageWorkerWages.OrderBy(x => x.Value.GoldPerWorkUnit))
-        {
-            text += $"{jobId},{stats.GoldPerWorkUnit:F3},{stats.SampleCount},{(stats.IsDefault ? "default value" : "measured")}\n";
-        }
-
-        text += "\n# job,rank,speed,samples,meanWage,sdWage\n";
-        foreach (var (jobId, byRank) in _wageStats.WageBuckets.OrderBy(x => x.Key))
-        {
-            foreach (var (rank, bucket) in byRank.OrderBy(x => x.Key).Where(x => x.Value.Count > 0))
+        var wageRows = _wageStats.AverageWorkerWages
+            .OrderBy(x => x.Value.GoldPerWorkUnit)
+            .Select(x => new[]
             {
-                var mean = bucket.SumWage / bucket.Count;
-                var sd = Math.Sqrt(Math.Max(0, bucket.SumWageSq / bucket.Count - mean * mean));
-                text += $"{jobId},{rank},{_wageStats.Speed(rank):F0},{bucket.Count},{mean:F1},{sd:F1}\n";
-            }
-        }
+                x.Key,
+                x.Value.GoldPerWorkUnit.ToString("F3", CultureInfo.InvariantCulture),
+                x.Value.SampleCount.ToString(CultureInfo.InvariantCulture),
+                x.Value.IsDefault ? "default" : "measured",
+            })
+            .ToList();
 
+        var bucketRows = _wageStats.WageBuckets
+            .OrderBy(x => x.Key)
+            .SelectMany(job => job.Value
+                .OrderBy(x => x.Key)
+                .Where(x => x.Value.Count > 0)
+                .Select(rank =>
+                {
+                    var mean = rank.Value.SumWage / rank.Value.Count;
+                    var sd = Math.Sqrt(Math.Max(0, rank.Value.SumWageSq / rank.Value.Count - mean * mean));
+                    return new[]
+                    {
+                        job.Key,
+                        rank.Key.ToString(CultureInfo.InvariantCulture),
+                        _wageStats.Speed(rank.Key).ToString("F0", CultureInfo.InvariantCulture),
+                        rank.Value.Count.ToString(CultureInfo.InvariantCulture),
+                        mean.ToString("F1", CultureInfo.InvariantCulture),
+                        sd.ToString("F1", CultureInfo.InvariantCulture),
+                    };
+                }))
+            .ToList();
+
+        var text = 
+            "# gold per work unit\n" +
+            FormatTable(["job", "gphPerWorkUnit", "samples", "source"], wageRows) +
+            "\n# samples per job and rank\n" +
+            FormatTable(["job", "rank", "speed", "samples", "meanWage", "sdWage"], bucketRows);
         return text;
     }
 
