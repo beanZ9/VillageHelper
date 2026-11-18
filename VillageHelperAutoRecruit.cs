@@ -78,7 +78,9 @@ public partial class VillageHelper
     
     private int GetOfferedWorkerCost(Element offeredWorkerElement)
     {
-        return int.Parse(offeredWorkerElement.Children[0].Children[1].Children[0].Text.Replace(",", ""));
+        var text = offeredWorkerElement.Children[0].Children[1].Children[0].Text;
+        // Throw rather here if we can't parse to avoid unintended behavior
+        return TryParseDisplayedInt(text) ?? throw new FormatException($"Could not read worker cost from '{text}'");
     }
 
     private record HireCandidate(Element Element, VillageWorkerForSale Worker, string JobId, int Cost);

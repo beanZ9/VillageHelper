@@ -31,15 +31,20 @@ public partial class VillageHelper : BaseSettingsPlugin<VillageHelperSettings>
     private static int GetWorkerJobRank(BaseVillageWorker worker, VillageJobType job) =>
         worker.JobRanks.FirstOrDefault(r => r.Key?.Id == job.Id).Value;
 
-    private static int? TryParseWage(string text)
+    // Game client appears to format numbers > 999 with the client's locale: "2,230", "2.230", "2 230", etc.,
+    // Extract only the digits.
+    private static int? TryParseDisplayedInt(string text)
     {
         if (string.IsNullOrEmpty(text))
         {
             return null;
         }
 
-        return int.TryParse(text.Replace(",", "").Replace("/h", ""), out var wage) ? wage : null;
+        var digits = new string(text.Where(char.IsAsciiDigit).ToArray());
+        return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : null;
     }
+
+    private static int? TryParseWage(string text) => TryParseDisplayedInt(text);
     
     // split worker names from ui elements into forename + surname, keeping in mind multi token surnames
     private static (string forename, string surname) SplitName(string name)
